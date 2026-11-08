@@ -105,7 +105,7 @@ Go to the [**latest release**](https://github.com/corrooli/PracticeSpaceRecorder
 
 1. Open the `.dmg` and drag **PracticeSpaceRecorder** into **Applications**.
 2. Open it from Applications.
-3. macOS will say it can't check the app for malicious software. That's because we don't pay Apple for a developer certificate every year. To open it anyway:
+3. macOS will say it can't check the app for malicious software (older versions may even call it "damaged", it isn't). That's because we don't pay Apple for a developer certificate every year. To open it anyway:
    * Open **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to PracticeSpaceRecorder.
    * Or run this once in Terminal: `xattr -dr com.apple.quarantine /Applications/PracticeSpaceRecorder.app`
 4. Allow microphone access when asked. (The microphone is your audio interface. We promise we're not listening to your band. Well, we are, but only when you press space.)
