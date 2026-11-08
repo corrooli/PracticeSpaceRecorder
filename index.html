@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Recorder" />
+    <meta name="theme-color" content="#121116" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="apple-touch-icon" href="/icon.png" />
+    <title>PracticeSpaceRecorder</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="plate head">
+        <div class="brand">
+          <div class="studio">PRACTICE SPACE RECORDER</div>
+        </div>
+        <div class="preset-zone">
+          <div class="engraved center">PRESET</div>
+          <div class="preset-display glass">
+            <button class="arrow" id="prevPreset" aria-label="Previous preset">‹</button>
+            <div class="preset-name" id="presetName">-</div>
+            <button class="arrow" id="nextPreset" aria-label="Next preset">›</button>
+          </div>
+          <div class="preset-sub" id="presetSub"></div>
+        </div>
+        <div class="head-keys">
+          <button class="key" id="presetsKey"><i class="win"></i><span>PRESETS</span></button>
+          <button class="key" id="settingsKey"><i class="win"></i><span>SETUP</span></button>
+          <button class="key small" id="fsKey" title="Fullscreen (F)"><i class="win"></i><span>⤢</span></button>
+        </div>
+      </header>
+
+      <section class="status plate" id="status"></section>
+
+      <main class="bay">
+        <canvas id="wave"></canvas>
+        <div class="bay-sheen"></div>
+        <div class="bay-overlay" id="bayOverlay"></div>
+      </main>
+
+      <footer class="transport plate">
+        <button class="rec-key" id="recKey">
+          <i class="win"></i>
+          <span class="rec-led led led-lg led-redoff" id="recLed"></span>
+          <span class="rec-label" id="recLabel">REC</span>
+          <span class="keycap" id="keycap">SPACE</span>
+        </button>
+        <div class="clock glass">
+          <div class="clock-top"><span class="engraved">TAKE</span><span id="takeName" class="take-name">Ready when you are</span></div>
+          <div class="clock-digits" id="clock">00:00:00<small>.0</small></div>
+          <div class="clock-msg" id="clockMsg">Press SPACE to record</div>
+        </div>
+        <div class="takes">
+          <div class="takes-head"><span class="engraved">RECENT TAKES</span><span class="engraved dim" id="queueInfo"></span></div>
+          <div class="takes-list" id="takes"></div>
+        </div>
+      </footer>
+    </div>
+
+    <div id="sheet" class="sheet hidden"></div>
+    <div id="toast" class="toast hidden"></div>
+    <div id="offline" class="offline hidden"><div class="offline-card plate"><span class="led led-amber blink led-lg"></span><div><b>Looking for the recorder</b><br /><span id="offlineMsg">Reconnecting…</span></div></div></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

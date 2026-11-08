@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PracticeSpaceRecorder",
+  "version": "1.0.0",
+  "identifier": "io.github.corrooli.practicespacerecorder",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run build"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    },
+    "macOSPrivateApi": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app", "deb", "appimage", "rpm"],
+    "category": "Music",
+    "shortDescription": "One-key band practice recorder",
+    "longDescription": "Press space to record, press space to stop. PracticeSpaceRecorder writes your take to every destination in the background (local disk, NAS, SMB share) while you play the next song.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "infoPlist": "Info.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libasound2"]
+      }
+    }
+  }
+}

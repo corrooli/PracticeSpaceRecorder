@@ -1,0 +1,461 @@
+// Preset editor + setup sheet. Lives on the recording computer only.
+
+import { h, clear, led, setLed, setText, toggleClass, noFocus, fmtBytes } from "./dom";
+import type { AppState, Preset, Destination, Mode, Format, LiveMsg } from "./types";
+
+export interface EditorApi {
+  send(cmd: Record<string, unknown>): void;
+  pickFolder(start: string): Promise<string | null>;
+  onLive(f: (m: LiveMsg) => void): () => void;
+  getMeters(): number[];
+  isPrivileged(): boolean;
+}
+
+type Tab = "presets" | "setup";
+const clone = <T>(x: T): T => JSON.parse(JSON.stringify(x));
+const uid = (p: string) => p + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+function key(label: string, onClick: () => void, cls = ""): HTMLButtonElement {
+  const b = h("button", { class: "key " + cls }, h("i", { class: "win" }), h("span", null, label)) as HTMLButtonElement;
+  noFocus(b);
+  b.addEventListener("click", onClick);
+  return b;
+}
+
+function seg<T extends string>(opts: [T, string][], value: T, onChange: (v: T) => void): HTMLElement {
+  const wrap = h("div", { class: "seg" });
+  for (const [v, label] of opts) {
+    const b = noFocus(h("button", { class: v === value ? "on" : "" }, label));
+    b.addEventListener("click", () => {
+      Array.prototype.forEach.call(wrap.children, (c: Element) => c.classList.remove("on"));
+      b.classList.add("on");
+      onChange(v);
+    });
+    wrap.appendChild(b);
+  }
+  return wrap;
+}
+
+function toggle(label: string, sub: string, on: boolean, onChange: (v: boolean) => void): HTMLElement {
+  const el = h("div", { class: "toggle" + (on ? " on" : "") }, h("span", { class: "sw" }), h("div", null, h("b", null, label), sub ? h("small", null, sub) : null));
+  el.addEventListener("click", () => {
+    const v = !el.classList.contains("on");
+    toggleClass(el, "on", v);
+    onChange(v);
+  });
+  return el;
+}
+
+function field(label: string, control: HTMLElement, hint?: string | HTMLElement): HTMLElement {
+  return h("div", { class: "field" }, h("label", { class: "engraved" }, label), control, hint ? h("div", { class: "hint" }, hint) : null);
+}
+
+function input(value: string, onInput: (v: string) => void, attrs: Record<string, string> = {}): HTMLInputElement {
+  const el = h("input", { class: "input", value, spellcheck: "false", autocomplete: "off", ...attrs }) as HTMLInputElement;
+  el.value = value;
+  el.addEventListener("input", () => onInput(el.value));
+  return el;
+}
+
+export function expandTemplate(tpl: string, preset: string, take: number, d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const time = `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+  const clean = (s: string) => s.replace(/[\\/:*?"<>|]/g, "-").trim();
+  return (tpl.trim() || "{date} {time} {preset}")
+    .split(/[\\/]/)
+    .map((part) => part.split("{preset}").join(clean(preset)).split("{date}").join(date).split("{time}").join(time)
+      .split("{take}").join(p(take)).split("{year}").join(String(d.getFullYear())).split("{month}").join(p(d.getMonth() + 1)).split("{day}").join(p(d.getDate())))
+    .map(clean)
+    .filter((x) => x)
+    .join(" / ");
+}
+
+export class Editor {
+  private root = document.getElementById("sheet") as HTMLElement;
+  private tab: Tab = "presets";
+  private state: AppState | null = null;
+  private selId = "";
+  private draft: Preset | null = null;
+  private dirty = false;
+  private body: HTMLElement | null = null;
+  private listEl: HTMLElement | null = null;
+  private footHint: HTMLElement | null = null;
+  private saveBtn: HTMLButtonElement | null = null;
+  private chMeters: { ch: number; bar: HTMLElement }[] = [];
+  private destLeds: { id: string; led: HTMLElement; text: HTMLElement }[] = [];
+  private devSig = "";
+  private unLive: (() => void) | null = null;
+  private api!: EditorApi;
+
+  init(api: EditorApi) {
+    this.api = api;
+    this.root.addEventListener("mousedown", (e) => { if (e.target === this.root) this.close(); });
+  }
+
+  isOpen() { return !this.root.classList.contains("hidden"); }
+
+  open(tab: Tab) {
+    if (!this.api.isPrivileged() || !this.state) return;
+    this.tab = tab;
+    if (!this.draft || !this.dirty) this.select(this.state.active);
+    this.build();
+    toggleClass(this.root, "hidden", false);
+    if (!this.unLive) this.unLive = this.api.onLive(() => this.meters());
+  }
+
+  close() {
+    if (!this.isOpen()) return;
+    if (this.dirty) {
+      this.flash("Unsaved changes. SAVE them, or REVERT first.");
+      return;
+    }
+    toggleClass(this.root, "hidden", true);
+    if (this.unLive) { this.unLive(); this.unLive = null; }
+  }
+
+  update(s: AppState) {
+    const prev = this.state;
+    this.state = s;
+    if (!this.isOpen()) return;
+    // preset list (names / active) and statuses refresh live; the form stays put while you type.
+    this.renderList();
+    for (const d of this.destLeds) {
+      const st = s.dests.find((x) => x.id === d.id);
+      if (this.draft && this.draft.id === s.active && st) {
+        setLed(d.led, st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber", st.state === "checking" || st.state === "mounting");
+        setText(d.text, st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message);
+        toggleClass(d.text, "err", st.state === "error");
+      }
+    }
+    const sig = s.devices.map((d) => d.name + d.channels).join("|");
+    if (sig !== this.devSig && this.tab === "presets" && !this.typing()) this.renderForm();
+    if (this.tab === "setup" && prev && (prev.remote.clients !== s.remote.clients || prev.remote.urls[0] !== s.remote.urls[0])) this.build();
+    if (this.draft && !s.presets.some((p) => p.id === this.draft!.id) && !this.dirty && this.draft.id) this.select(s.active), this.build();
+  }
+
+  private typing() {
+    const a = document.activeElement as HTMLElement | null;
+    return !!a && this.root.contains(a) && (a.tagName === "INPUT" || a.tagName === "SELECT");
+  }
+
+  private select(id: string) {
+    const s = this.state!;
+    const p = s.presets.find((x) => x.id === id) || s.presets[0];
+    this.selId = p.id;
+    this.draft = clone(p);
+    this.dirty = false;
+  }
+
+  private setDirty() {
+    this.dirty = true;
+    if (this.saveBtn) this.saveBtn.classList.add("on");
+    if (this.footHint) { setText(this.footHint, "Unsaved changes"); this.footHint.style.color = "var(--amber)"; }
+    this.renderList();
+  }
+
+  private flash(msg: string) {
+    if (!this.footHint) return;
+    setText(this.footHint, msg);
+    this.footHint.style.color = "#ff9a84";
+    if (this.saveBtn) { this.saveBtn.classList.remove("pulse"); void this.saveBtn.offsetWidth; this.saveBtn.classList.add("pulse"); }
+  }
+
+  // ─── layout ────────────────────────────────────────────────────────────
+  private build() {
+    clear(this.root);
+    const s = this.state!;
+    const tabs = h("div", { class: "tabs" },
+      key("PRESETS", () => { this.tab = "presets"; this.build(); }, this.tab === "presets" ? "on" : ""),
+      key("SETUP", () => { this.tab = "setup"; this.build(); }, this.tab === "setup" ? "on" : ""),
+      key("✕", () => this.close(), "small"));
+    const head = h("div", { class: "sheet-head" }, h("div", { class: "sheet-title" }, this.tab === "presets" ? "PRESETS" : "SETUP", " ", h("span", null, "·"), " ", h("span", { class: "engraved dim", style: "letter-spacing:.24em" }, `v${s.version}`)), tabs);
+    this.footHint = h("div", { class: "foot-hint" });
+    let body: HTMLElement, foot: HTMLElement;
+    if (this.tab === "presets") {
+      this.listEl = h("div", null);
+      const listCol = h("div", { class: "plist" }, h("div", { class: "engraved", style: "display:block;margin:2px 4px 12px" }, "STORED PRESETS"), this.listEl,
+        h("div", { class: "plist-actions" }, key("+ NEW", () => this.newPreset()), key("COPY", () => this.duplicate())));
+      this.body = h("div", { class: "form" });
+      body = h("div", { class: "sheet-body" }, listCol, this.body);
+      this.saveBtn = key("SAVE", () => this.save(false), this.dirty ? "on" : "");
+      foot = h("div", { class: "sheet-foot" }, this.footHint,
+        h("div", null, key("DELETE", () => this.remove(), "red"), key("REVERT", () => { this.select(this.selId); this.renderForm(); this.renderList(); setText(this.footHint!, ""); }), this.saveBtn, key("SAVE & USE", () => this.save(true), "")));
+      setText(this.footHint, this.dirty ? "Unsaved changes" : "Presets are stored on disk the moment you hit SAVE.");
+      this.renderList();
+      this.renderForm();
+    } else {
+      this.body = h("div", { class: "form" });
+      body = h("div", { class: "sheet-body single" }, this.body);
+      foot = h("div", { class: "sheet-foot" }, this.footHint, h("div", null, key("QUIT APP", () => this.api.send({ cmd: "quit" }), "red"), key("DONE", () => this.close(), "on")));
+      setText(this.footHint, "Settings save themselves.");
+      this.renderSetup();
+    }
+    this.root.appendChild(h("div", { class: "sheet-card plate" }, head, body, foot));
+  }
+
+  private renderList() {
+    if (!this.listEl || !this.state) return;
+    const s = this.state;
+    clear(this.listEl);
+    const list = s.presets.slice();
+    if (this.draft && !list.some((p) => p.id === this.draft!.id)) list.push(this.draft);
+    for (const p of list) {
+      const isSel = p.id === this.selId;
+      const name = isSel && this.draft ? this.draft.name : p.name;
+      const b = noFocus(h("button", { class: "plist-item" + (isSel ? " sel" : "") }, led(p.id === s.active ? "green" : "off", "led-sm"), name + (isSel && this.dirty ? "  •" : "")));
+      b.addEventListener("click", () => {
+        if (p.id === this.selId) return;
+        if (this.dirty) return this.flash("Unsaved changes. SAVE them, or REVERT first.");
+        this.select(p.id);
+        this.renderList();
+        this.renderForm();
+        setText(this.footHint!, "");
+      });
+      this.listEl.appendChild(b);
+    }
+  }
+
+  // ─── preset form ───────────────────────────────────────────────────────
+  private renderForm() {
+    if (!this.body || !this.draft || !this.state) return;
+    const s = this.state, p = this.draft;
+    this.devSig = s.devices.map((d) => d.name + d.channels).join("|");
+    clear(this.body);
+    this.chMeters = [];
+    this.destLeds = [];
+    const set = <K extends keyof Preset>(k: K, v: Preset[K], rerender = false) => {
+      (p as any)[k] = v;
+      this.setDirty();
+      if (rerender) this.renderForm();
+    };
+
+    // name + device + rate
+    const dev = s.devices.find((d) => d.name === p.device) || (p.device ? null : s.devices.find((d) => d.is_default) || null);
+    const devSel = h("select", { class: "select" }) as HTMLSelectElement;
+    devSel.appendChild(h("option", { value: "" }, `System default${s.devices.find((d) => d.is_default) ? ` (${s.devices.find((d) => d.is_default)!.name})` : ""}`));
+    for (const d of s.devices) devSel.appendChild(h("option", { value: d.name }, `${d.name}  ·  ${d.channels} in`));
+    if (p.device && !s.devices.some((d) => d.name === p.device)) devSel.appendChild(h("option", { value: p.device }, `${p.device}  (not connected)`));
+    devSel.value = p.device;
+    devSel.addEventListener("change", () => set("device", devSel.value, true));
+    const rates = dev && dev.rates.length ? dev.rates : [44100, 48000, 88200, 96000];
+    const rateSel = h("select", { class: "select" }) as HTMLSelectElement;
+    for (const r of rates.indexOf(p.sample_rate) < 0 ? rates.concat([p.sample_rate]) : rates) rateSel.appendChild(h("option", { value: String(r) }, `${r / 1000} kHz`));
+    rateSel.value = String(p.sample_rate);
+    rateSel.addEventListener("change", () => set("sample_rate", Number(rateSel.value)));
+    const nameIn = input(p.name, (v) => { p.name = v; this.setDirty(); });
+
+    this.body.appendChild(h("div", { class: "section" }, h("div", { class: "row three" },
+      field("PRESET NAME", nameIn), field("INPUT DEVICE", devSel), field("SAMPLE RATE", rateSel))));
+
+    // mode + channels
+    const devCh = dev ? dev.channels : Math.max(2, ...p.channels);
+    const modeSeg = seg<Mode>([["mono", "MONO"], ["stereo", "STEREO"], ["multitrack", "MULTITRACK"]], p.mode, (m) => {
+      p.mode = m;
+      if (m === "mono") p.channels = [p.channels[0] || 1];
+      else if (m === "stereo") { const l = p.channels[0] || 1; p.channels = [l, Math.min(devCh, l + 1) === l ? Math.max(1, l - 1) : l + 1]; }
+      else p.channels = Array.from({ length: devCh }, (_, i) => i + 1);
+      this.setDirty();
+      this.renderForm();
+    });
+    const names = new Map<number, string>();
+    p.channels.forEach((c, i) => { if (p.track_names[i]) names.set(c, p.track_names[i]); });
+    const setChannels = (chs: number[]) => {
+      p.channels = chs;
+      p.track_names = chs.map((c) => names.get(c) || "");
+      this.setDirty();
+      this.renderForm();
+    };
+    const grid = h("div", { class: "chgrid" });
+    for (let c = 1; c <= devCh; c++) {
+      const idx = p.channels.indexOf(c);
+      const on = idx >= 0;
+      const sub = !on ? "IN" : p.mode === "stereo" ? (idx === 0 ? "LEFT" : "RIGHT") : p.mode === "mono" ? "MONO" : `TRK ${idx + 1}`;
+      const bar = h("i");
+      const b = noFocus(h("button", { class: "ch" + (on ? " on" : "") }, String(c), h("small", null, sub), h("span", { class: "mtr" }, bar)));
+      this.chMeters.push({ ch: c - 1, bar });
+      b.addEventListener("click", (e: MouseEvent) => {
+        if (p.mode === "mono") setChannels([c]);
+        else if (p.mode === "stereo") {
+          if (e.altKey) setChannels([p.channels[0] || 1, c]);
+          else setChannels(c < devCh ? [c, c + 1] : [Math.max(1, c - 1), c]);
+        } else setChannels(on ? p.channels.filter((x) => x !== c) : p.channels.concat([c]).sort((a, b) => a - b));
+      });
+      grid.appendChild(b);
+    }
+    const tools = h("div", { class: "chtools" }, modeSeg);
+    if (p.mode === "multitrack") {
+      tools.appendChild(h("span", { style: "width:14px" }));
+      tools.appendChild(key("ALL", () => setChannels(Array.from({ length: devCh }, (_, i) => i + 1))));
+      tools.appendChild(key("NONE", () => setChannels([])));
+    }
+    const missing = p.channels.filter((c) => c > devCh);
+    if (missing.length && dev) tools.appendChild(h("span", { class: "hint", style: "color:#ff9a84" }, `${dev.name} has ${devCh} input${devCh > 1 ? "s" : ""}. Channel ${missing.join(", ")} will fall back to the last one.`));
+    else tools.appendChild(h("span", { class: "hint" }, p.mode === "stereo" ? "Click a channel to pick the pair. Alt-click picks the right channel on its own." : p.mode === "mono" ? "Play something and watch the meters to find your channel." : "Click channels to add or remove tracks. Meters move when you play."));
+    const nameRow = h("div", { class: "names" });
+    {
+      p.channels.forEach((c, i) => {
+        const def = p.mode === "stereo" ? (i === 0 ? "Left" : "Right") : p.mode === "mono" ? "Mono" : `In ${c}`;
+        const el = input(p.track_names[i] || "", (v) => { while (p.track_names.length < p.channels.length) p.track_names.push(""); p.track_names[i] = v; names.set(c, v); this.setDirty(); }, { placeholder: def });
+        nameRow.appendChild(h("div", { class: "nm" }, h("span", null, String(c)), el));
+      });
+    }
+    this.body.appendChild(h("div", { class: "section" }, h("span", { class: "engraved" }, `RECORDING MODE & CHANNELS  ·  ${dev ? dev.name : p.device || "default device"}`), tools, grid,
+      p.channels.length ? h("div", { class: "engraved", style: "display:block;margin:16px 0 0" }, "TRACK NAMES") : null, nameRow));
+
+    // format
+    const fmtRow = h("div", { class: "row" },
+      field("FILE FORMAT", seg<Format>([["wav16", "16-BIT"], ["wav24", "24-BIT"], ["wav32f", "32 FLOAT"]], p.format, (f) => set("format", f)), "WAV. Big files go RF64 automatically, so nothing breaks at 4 GB."),
+      field("PRE-ROLL", seg<string>([["0", "OFF"], ["1", "1 S"], ["2", "2 S"], ["5", "5 S"]], String(p.preroll_secs), (v) => set("preroll_secs", Number(v))), "Audio from before you pressed SPACE. Nobody hits the key exactly on the one."));
+    this.body.appendChild(h("div", { class: "section" }, fmtRow));
+    if (p.mode === "multitrack") {
+      this.body.appendChild(h("div", { class: "section" }, toggle("One file per track", "Writes a folder of mono WAVs (01 Kick.wav, 02 Snare.wav…). Drag the folder into any DAW.", p.split_tracks, (v) => set("split_tracks", v))));
+    }
+
+    // filename
+    const preview = h("div", { class: "preview" });
+    const updPreview = () => setText(preview, expandTemplate(p.filename, p.name, 1) + (p.mode === "multitrack" && p.split_tracks ? " / 01 …wav" : ".wav"));
+    const fnIn = input(p.filename, (v) => { p.filename = v; this.setDirty(); updPreview(); }, { class: "input mono" });
+    const chips = h("div", { class: "hint" }, "Tokens: ", ...["{date}", "{time}", "{take}", "{preset}", "{year}", "{month}", "{day}"].map((t) => {
+      const c = h("code", { style: "cursor:pointer;margin-right:8px" }, t);
+      c.addEventListener("mousedown", (e: Event) => { e.preventDefault(); const pos = fnIn.selectionStart ?? fnIn.value.length; fnIn.value = fnIn.value.slice(0, pos) + t + fnIn.value.slice(pos); fnIn.dispatchEvent(new Event("input")); });
+      return c;
+    }), "  ·  use / for folders");
+    updPreview();
+    this.body.appendChild(h("div", { class: "section" }, field("FILE NAME", fnIn, chips), preview));
+
+    // destinations
+    const dsec = h("div", { class: "section" }, h("span", { class: "engraved" }, "DESTINATIONS  ·  EVERY TAKE GOES TO ALL OF THESE, IN THE BACKGROUND"));
+    p.destinations.forEach((d, i) => dsec.appendChild(this.destRow(p, d, i)));
+    dsec.appendChild(key("+ ADD DESTINATION", () => {
+      p.destinations.push({ id: uid("d"), label: p.destinations.length ? "NAS" : "Local", path: "", smb_url: "", mount_cmd: "", enabled: true });
+      this.setDirty();
+      this.renderForm();
+    }));
+    this.body.appendChild(dsec);
+    this.meters();
+  }
+
+  private destRow(p: Preset, d: Destination, i: number): HTMLElement {
+    const s = this.state!;
+    const st = p.id === s.active ? s.dests.find((x) => x.id === d.id) : undefined;
+    const l = led(!d.enabled ? "off" : st ? (st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber") : "off");
+    l.title = d.enabled ? "Enabled (click to disable)" : "Disabled (click to enable)";
+    const statusText = h("div", { class: "dest-status" + (st && st.state === "error" ? " err" : "") },
+      !d.enabled ? "Disabled" : st ? (st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message) : p.id === s.active ? "Checking…" : "Checked when this preset is in use");
+    this.destLeds.push({ id: d.id, led: l, text: statusText });
+    l.addEventListener("click", () => { d.enabled = !d.enabled; this.setDirty(); this.renderForm(); });
+    const pathIn = input(d.path, (v) => { d.path = v; this.setDirty(); }, { class: "input mono", placeholder: s.platform === "macos" ? "/Volumes/NAS/Band" : "/mnt/nas/band" });
+    const browse = key("BROWSE", async () => {
+      const r = await this.api.pickFolder(d.path || s.music_dir);
+      if (r) { d.path = r; pathIn.value = r; this.setDirty(); }
+    });
+    const smbIn = input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); }, { class: "input mono", placeholder: "smb://user@nas.local/music" });
+    const cmdIn = input(d.mount_cmd, (v) => { d.mount_cmd = v; this.setDirty(); }, { class: "input mono", placeholder: "mount /mnt/nas" });
+    const showAdv = !!(d.mount_cmd);
+    const adv = h("div", { class: "adv", style: showAdv ? "" : "display:none" }, field("MOUNT COMMAND (OPTIONAL)", cmdIn, "Runs when the folder is missing. Handy on Linux with an fstab entry."));
+    const advLink = noFocus(h("button", { class: "linkish", style: showAdv ? "display:none" : "" }, "Custom mount command…"));
+    advLink.addEventListener("click", () => { adv.style.display = ""; advLink.style.display = "none"; });
+    const fields = h("div", { class: "dest-fields" },
+      h("div", { class: "row", style: "grid-template-columns: 180px 1fr" },
+        field("NAME", input(d.label, (v) => { d.label = v; this.setDirty(); })),
+        field("FOLDER", h("div", { class: "dest-path" }, pathIn, browse))),
+      h("div", { style: "margin-top:10px" }, field("NETWORK SHARE (AUTO-CONNECT)", smbIn, s.platform === "macos"
+        ? "If the folder is missing, the share is mounted with your Keychain login. Folder is then e.g. /Volumes/music/Band."
+        : "Mounted with gio. Folder is then /run/user/<uid>/gvfs/smb-share:server=…,share=…")),
+      advLink, adv, statusText);
+    const side = h("div", { class: "dest-side" },
+      key("REMOVE", () => { p.destinations.splice(i, 1); this.setDirty(); this.renderForm(); }, "red"));
+    return h("div", { class: "dest" + (d.enabled ? "" : " disabled") }, l, fields, side);
+  }
+
+  private meters() {
+    const m = this.api.getMeters();
+    for (const { ch, bar } of this.chMeters) {
+      const v = m[ch] || 0;
+      const db = v > 0 ? 20 * Math.log10(v) : -90;
+      const w = Math.max(0, Math.min(100, ((db + 54) / 54) * 100));
+      bar.style.width = w.toFixed(1) + "%";
+    }
+  }
+
+  // ─── preset actions ────────────────────────────────────────────────────
+  private save(activate: boolean) {
+    if (!this.draft) return;
+    const p = this.draft;
+    if (p.mode === "multitrack" && !p.channels.length) return this.flash("Pick at least one channel.");
+    while (p.track_names.length < p.channels.length) p.track_names.push("");
+    p.track_names = p.track_names.slice(0, p.channels.length);
+    this.api.send({ cmd: "save_preset", preset: p, activate });
+    this.dirty = false;
+    if (this.saveBtn) this.saveBtn.classList.remove("on");
+    setText(this.footHint!, activate ? "Saved and active." : "Saved.");
+    this.footHint!.style.color = "var(--green)";
+    this.renderList();
+  }
+
+  private newPreset() {
+    if (this.dirty) return this.flash("Unsaved changes. SAVE them, or REVERT first.");
+    const base = this.state!.presets.find((x) => x.id === this.state!.active)!;
+    this.draft = { ...clone(base), id: uid("p"), name: "New Preset" };
+    this.draft.destinations = this.draft.destinations.map((d) => ({ ...d, id: uid("d") }));
+    this.selId = this.draft.id;
+    this.dirty = true;
+    this.build();
+    this.setDirty();
+  }
+
+  private duplicate() {
+    if (this.dirty) return this.flash("Unsaved changes. SAVE them, or REVERT first.");
+    const src = this.draft!;
+    this.draft = { ...clone(src), id: uid("p"), name: src.name + " copy" };
+    this.selId = this.draft.id;
+    this.build();
+    this.setDirty();
+  }
+
+  private remove() {
+    const s = this.state!;
+    if (!this.draft) return;
+    if (!s.presets.some((p) => p.id === this.draft!.id)) { this.dirty = false; this.select(s.active); this.build(); return; }
+    if (s.presets.length <= 1) return this.flash("You need at least one preset. It's the law.");
+    const btn = this.root.querySelector(".sheet-foot .key.red") as HTMLElement;
+    if (!btn.classList.contains("on")) {
+      btn.classList.add("on");
+      btn.querySelector("span")!.textContent = "SURE?";
+      setTimeout(() => { btn.classList.remove("on"); const sp = btn.querySelector("span"); if (sp) sp.textContent = "DELETE"; }, 2500);
+      return;
+    }
+    this.api.send({ cmd: "delete_preset", id: this.draft.id });
+    this.dirty = false;
+    const next = s.presets.find((p) => p.id !== this.draft!.id)!;
+    this.select(next.id);
+    this.build();
+  }
+
+  // ─── setup tab ─────────────────────────────────────────────────────────
+  private renderSetup() {
+    const s = this.state!, b = this.body!;
+    clear(b);
+    b.appendChild(h("div", { class: "section" }, h("span", { class: "engraved" }, "WINDOW"),
+      toggle("Start in fullscreen", "The app opens straight into fullscreen. Press F to toggle any time.", s.settings.fullscreen, (v) => this.api.send({ cmd: "save_settings", settings: { fullscreen: v } }))));
+
+    const others = s.remote.clients;
+    const qr = h("div", { class: "qr", html: s.remote.qr });
+    const portIn = input(String(s.settings.port), () => {}, { type: "number", min: "1024", max: "65535", style: "width:120px" });
+    portIn.addEventListener("change", () => this.api.send({ cmd: "save_settings", settings: { port: Number(portIn.value) } }));
+    b.appendChild(h("div", { class: "section" }, h("span", { class: "engraved" }, "REMOTE CONTROL  ·  TABLET / PHONE"),
+      toggle("Allow remote control", "Any device on your network can start, stop and switch presets. Only this computer can edit them.", s.settings.remote_enabled, (v) => this.api.send({ cmd: "save_settings", settings: { remote_enabled: v } })),
+      h("div", { class: "remote-box", style: "margin-top:12px" + (s.settings.remote_enabled ? "" : ";opacity:.4") }, qr,
+        h("div", null,
+          h("div", { class: "engraved", style: "margin-bottom:10px" }, "SCAN, OR OPEN THIS IN SAFARI / CHROME"),
+          ...s.remote.urls.map((u, i) => h("div", { class: "url" + (i ? " alt" : "") }, u)),
+          h("p", { class: "hint", style: "font-size:13px;line-height:1.5;margin:16px 0" }, "Tip: on an iPad, tap Share, then “Add to Home Screen”. You get a fullscreen remote with a giant REC button, far away from your guitar headstock and the table edge."),
+          h("div", { class: "kv" }, h("span", null, "Connected"), h("span", null, others ? `${others} device${others > 1 ? "s" : ""}` : "None right now"), h("span", null, "Port"), h("span", null, portIn))))));
+
+    b.appendChild(h("div", { class: "section" }, h("span", { class: "engraved" }, "HOW YOUR TAKES TRAVEL"),
+      h("p", { class: "hint", style: "font-size:13px;line-height:1.6;max-width:780px" },
+        "Audio is written to a local buffer first, so a slow or sleeping NAS can never cost you a take. When you stop, the take is delivered to every destination in the background while you already record the next song. If a share is offline, the take waits and delivers itself when the share is back, even after a restart. The buffer copy is deleted only once every destination has it."),
+      h("div", { class: "kv", style: "margin-top:10px" }, h("span", null, "Version"), h("span", null, s.version), h("span", null, "Platform"), h("span", null, s.platform), h("span", null, "Default folder"), h("span", null, s.music_dir))));
+  }
+}
