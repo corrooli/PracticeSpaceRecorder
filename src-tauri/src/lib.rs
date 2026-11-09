@@ -1,10 +1,13 @@
 mod audio;
 mod config;
 mod dest;
+mod device;
 mod engine;
 mod jobs;
 mod server;
 mod wav;
+#[cfg(test)]
+mod testutil;
 
 use engine::{Engine, WindowCmd};
 use tauri::Manager;
@@ -14,7 +17,7 @@ pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     log::info!("PracticeSpaceRecorder {} starting", env!("CARGO_PKG_VERSION"));
 
-    let engine = Engine::start();
+    let engine = Engine::start_with(&config::config_dir().join("config.json"), config::data_dir(), device::CpalBackend, engine::keep_awake);
     let settings = engine.settings();
     let port = tauri::async_runtime::block_on(server::serve(engine.clone(), settings.port)).expect("cannot start UI server");
     engine.set_server_info(port);

@@ -2,7 +2,7 @@ import "./style.css";
 import { h, setText, toggleClass, clear, led, setLed, fmtBytes, fmtClock, fmtDur, noFocus } from "./dom";
 import { WaveView } from "./wave";
 import { Editor } from "./editor";
-import type { AppState, LiveMsg, HistMsg, JobView } from "./types";
+import type { AppState, LiveMsg, HistMsg, JobView, Destination, DestTest } from "./types";
 
 // ─── connection ───────────────────────────────────────────────────────────
 type Listener = (m: LiveMsg) => void;
@@ -14,6 +14,7 @@ let liveRecording = false;
 let lastMeters: number[] = [];
 const liveListeners: Listener[] = [];
 const pickListeners: Record<string, (p: string | null) => void> = {};
+const testListeners: Record<string, (r: DestTest) => void> = {};
 
 function send(cmd: Record<string, unknown>) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd));
@@ -26,11 +27,21 @@ function pickFolder(start: string): Promise<string | null> {
   return new Promise((res) => { pickListeners[req] = res; send({ cmd: "pick_folder", req, start }); });
 }
 
+/** Ask the recorder to write a test file where this destination's takes would go. */
+function testDest(d: Destination): Promise<DestTest> {
+  const req = Math.random().toString(36).slice(2);
+  return new Promise((res) => {
+    const t = setTimeout(() => { delete testListeners[req]; res({ ok: false, msg: "No answer from the recorder", path: "", free: 0 }); }, 30000);
+    testListeners[req] = (r) => { clearTimeout(t); res(r); };
+    send({ cmd: "test_dest", req, dest: d });
+  });
+}
+
 if (/[?&]shot/.test(location.search)) document.body.classList.add("shot");
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const wave = new WaveView($("wave") as HTMLCanvasElement);
 const editor = new Editor();
-editor.init({ send, pickFolder, onLive, getMeters, isPrivileged });
+editor.init({ send, pickFolder, testDest, onLive, getMeters, isPrivileged });
 let retry = 0;
 
 function connect() {
@@ -64,6 +75,9 @@ function connect() {
       }
       case "picked":
         if (pickListeners[m.req]) { pickListeners[m.req](m.path); delete pickListeners[m.req]; }
+        break;
+      case "dest_test":
+        if (testListeners[m.req]) { testListeners[m.req](m as DestTest); delete testListeners[m.req]; }
         break;
     }
   };

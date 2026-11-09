@@ -1,11 +1,13 @@
 // Preset editor + setup sheet. Lives on the recording computer only.
 
 import { h, clear, led, setLed, setText, toggleClass, noFocus, fmtBytes } from "./dom";
-import type { AppState, Preset, Destination, Mode, Format, LiveMsg } from "./types";
+import type { AppState, Preset, Destination, DestStatus, Mode, Format, LiveMsg, DestTest } from "./types";
+import { KINDS, kindInfo, newDestination, parseShareUrl } from "./destinations";
 
 export interface EditorApi {
   send(cmd: Record<string, unknown>): void;
   pickFolder(start: string): Promise<string | null>;
+  testDest(d: Destination): Promise<DestTest>;
   onLive(f: (m: LiveMsg) => void): () => void;
   getMeters(): number[];
   isPrivileged(): boolean;
@@ -83,7 +85,10 @@ export class Editor {
   private footHint: HTMLElement | null = null;
   private saveBtn: HTMLButtonElement | null = null;
   private chMeters: { ch: number; bar: HTMLElement }[] = [];
-  private destLeds: { id: string; led: HTMLElement; text: HTMLElement }[] = [];
+  /** `hold`: a TEST result is on screen until then; live status waits. */
+  private destLeds: { id: string; led: HTMLElement; text: HTMLElement; card: HTMLElement; lands: HTMLElement | null; hold: number }[] = [];
+  /** The "where should takes go?" tiles are open. */
+  private picking = false;
   private devSig = "";
   private unLive: (() => void) | null = null;
   private api!: EditorApi;
@@ -122,10 +127,8 @@ export class Editor {
     this.renderList();
     for (const d of this.destLeds) {
       const st = s.dests.find((x) => x.id === d.id);
-      if (this.draft && this.draft.id === s.active && st) {
-        setLed(d.led, st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber", st.state === "checking" || st.state === "mounting");
-        setText(d.text, st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message);
-        toggleClass(d.text, "err", st.state === "error");
+      if (this.draft && this.draft.id === s.active && st && Date.now() >= d.hold && d.card.dataset.state !== "off") {
+        this.showStatus(d, st);
       }
     }
     const sig = s.devices.map((d) => d.name + d.channels).join("|");
@@ -145,6 +148,7 @@ export class Editor {
     this.selId = p.id;
     this.draft = clone(p);
     this.dirty = false;
+    this.picking = false;
   }
 
   private setDirty() {
@@ -309,7 +313,7 @@ export class Editor {
       field("PRE-ROLL", seg<string>([["0", "OFF"], ["1", "1 S"], ["2", "2 S"], ["5", "5 S"]], String(p.preroll_secs), (v) => set("preroll_secs", Number(v))), "Audio from before you pressed SPACE. Nobody hits the key exactly on the one."));
     this.body.appendChild(h("div", { class: "section" }, fmtRow));
     if (p.mode === "multitrack") {
-      this.body.appendChild(h("div", { class: "section" }, toggle("One file per track", "Writes a folder of mono WAVs (01 Kick.wav, 02 Snare.wav…). Drag the folder into any DAW.", p.split_tracks, (v) => set("split_tracks", v))));
+      this.body.appendChild(h("div", { class: "section" }, toggle("One file per track", "Writes a folder of mono WAVs (01 Kick.wav, 02 Snare.wav…). Drag the folder into any DAW.", p.split_tracks, (v) => set("split_tracks", v, true))));
     }
 
     // filename
@@ -325,48 +329,136 @@ export class Editor {
     this.body.appendChild(h("div", { class: "section" }, field("FILE NAME", fnIn, chips), preview));
 
     // destinations
-    const dsec = h("div", { class: "section" }, h("span", { class: "engraved" }, "DESTINATIONS  ·  EVERY TAKE GOES TO ALL OF THESE, IN THE BACKGROUND"));
-    p.destinations.forEach((d, i) => dsec.appendChild(this.destRow(p, d, i)));
-    dsec.appendChild(key("+ ADD DESTINATION", () => {
-      p.destinations.push({ id: uid("d"), label: p.destinations.length ? "NAS" : "Local", path: "", smb_url: "", mount_cmd: "", enabled: true });
-      this.setDirty();
-      this.renderForm();
-    }));
-    this.body.appendChild(dsec);
+    const cards = h("div", { class: "dcards" }, p.destinations.map((d, i) => this.destCard(p, d, i)));
+    const add = this.picking || !p.destinations.length ? this.kindPicker(p) : (() => {
+      const b = noFocus(h("button", { class: "dadd" }, h("span", { class: "dadd-plus" }, "+"), "ADD DESTINATION"));
+      b.addEventListener("click", () => { this.picking = true; this.renderForm(); });
+      return b;
+    })();
+    this.body.appendChild(h("div", { class: "section" }, h("span", { class: "engraved" }, "DESTINATIONS  ·  EVERY TAKE GOES TO ALL OF THESE, IN THE BACKGROUND"), cards, add));
     this.meters();
   }
 
-  private destRow(p: Preset, d: Destination, i: number): HTMLElement {
-    const s = this.state!;
-    const st = p.id === s.active ? s.dests.find((x) => x.id === d.id) : undefined;
-    const l = led(!d.enabled ? "off" : st ? (st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber") : "off");
-    l.title = d.enabled ? "Enabled (click to disable)" : "Disabled (click to enable)";
-    const statusText = h("div", { class: "dest-status" + (st && st.state === "error" ? " err" : "") },
-      !d.enabled ? "Disabled" : st ? (st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message) : p.id === s.active ? "Checking…" : "Checked when this preset is in use");
-    this.destLeds.push({ id: d.id, led: l, text: statusText });
-    l.addEventListener("click", () => { d.enabled = !d.enabled; this.setDirty(); this.renderForm(); });
-    const pathIn = input(d.path, (v) => { d.path = v; this.setDirty(); }, { class: "input mono", placeholder: s.platform === "macos" ? "/Volumes/NAS/Band" : "/mnt/nas/band" });
-    const browse = key("BROWSE", async () => {
-      const r = await this.api.pickFolder(d.path || s.music_dir);
-      if (r) { d.path = r; pathIn.value = r; this.setDirty(); }
+  private kindPicker(p: Preset): HTMLElement {
+    const tiles = KINDS.map((k) => {
+      const t = noFocus(h("button", { class: `ktile kind-${k.kind}` }, h("i", { class: "win" }),
+        h("div", { class: "ktile-icon", html: k.icon }), h("div", { class: "ktile-title" }, k.title), h("div", { class: "ktile-blurb" }, k.blurb)));
+      t.addEventListener("click", () => {
+        p.destinations.push(newDestination(k.kind, p.destinations, uid("d")));
+        this.picking = false;
+        this.setDirty();
+        this.renderForm();
+      });
+      return t;
     });
-    const smbIn = input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); }, { class: "input mono", placeholder: "smb://user@nas.local/music" });
+    const cancel = p.destinations.length ? key("CANCEL", () => { this.picking = false; this.renderForm(); }) : null;
+    return h("div", { class: "kpicker" },
+      h("div", { class: "kpicker-head" }, h("span", { class: "engraved" }, "WHERE SHOULD TAKES GO?"), cancel),
+      h("div", { class: "ktiles" }, tiles),
+      p.destinations.length ? null : h("div", { class: "hint", style: "margin-top:12px" }, "Nothing picked yet, so takes go to your Music folder for now."));
+  }
+
+  /** LED + text + card glow for a live destination status. */
+  private showStatus(e: { led: HTMLElement; text: HTMLElement; card: HTMLElement; lands: HTMLElement | null }, st: DestStatus) {
+    setLed(e.led, st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber", st.state === "checking" || st.state === "mounting");
+    setText(e.text, st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message);
+    e.text.className = "dpill-text" + (st.state === "error" ? " err" : "");
+    e.card.dataset.state = st.state;
+    if (e.lands) {
+      toggleClass(e.lands, "hidden", !st.path);
+      setText(e.lands.querySelector("b")!, st.path);
+    }
+  }
+
+  private destCard(p: Preset, d: Destination, i: number): HTMLElement {
+    const s = this.state!;
+    const info = kindInfo(d.kind);
+    const active = p.id === s.active;
+    const st = active ? s.dests.find((x) => x.id === d.id) : undefined;
+    const l = led("off", "led-sm");
+    const text = h("span", { class: "dpill-text" });
+    const card = h("div", { class: `dcard kind-${d.kind}` });
+    const lands = d.kind === "share" ? h("div", { class: "lands hidden" }, "Lands in ", h("b")) : null;
+    const entry = { id: d.id, led: l, text, card, lands, hold: 0 };
+    this.destLeds.push(entry);
+    if (!d.enabled) { setText(text, "Off"); card.dataset.state = "off"; }
+    else if (st) this.showStatus(entry, st);
+    else { setText(text, active ? "Checking…" : "Checked when this preset is in use"); card.dataset.state = active ? "checking" : "idle"; if (active) setLed(l, "amber", true); }
+
+    const name = input(d.label, (v) => { d.label = v; this.setDirty(); }, { class: "dname", placeholder: info.label });
+    const power = noFocus(h("button", { class: "dswitch" + (d.enabled ? " on" : ""), title: d.enabled ? "On: takes go here (click to pause)" : "Off: skipped (click to turn on)" }));
+    power.addEventListener("click", () => { d.enabled = !d.enabled; this.setDirty(); this.renderForm(); });
+    const test: HTMLButtonElement = key("TEST", async () => {
+      if (test.classList.contains("testing")) return;
+      entry.hold = Infinity;
+      test.className = "key test testing";
+      setLed(l, "amber", true);
+      setText(text, "Testing: writing a file and reading it back…");
+      text.className = "dpill-text";
+      card.dataset.state = "checking";
+      const r = await this.api.testDest(clone(d));
+      entry.hold = Date.now() + 15000;
+      test.className = "key test " + (r.ok ? "ok" : "fail");
+      setLed(l, r.ok ? "green" : "red");
+      setText(text, r.ok ? `Works · ${fmtBytes(r.free)} free · ${r.path}` : r.msg);
+      text.className = "dpill-text " + (r.ok ? "good" : "err");
+      card.dataset.state = r.ok ? "ready" : "error";
+    }, "test");
+    test.title = "Write a test file there right now (connects the share if needed)";
+    const remove = key("REMOVE", () => { p.destinations.splice(i, 1); this.setDirty(); this.renderForm(); }, "red");
+    remove.title = "Remove this destination (REVERT brings it back)";
+
+    card.append(
+      h("div", { class: "dcard-head" },
+        h("div", { class: "dicon", html: info.icon }),
+        h("div", { class: "dtitle" }, name, h("div", { class: "dmeta" }, h("span", { class: "dkind" }, info.title), h("span", { class: "dpill" }, l, text))),
+        h("div", { class: "dactions" }, power, test, remove)),
+      h("div", { class: "dcard-body" }, this.destBody(d, lands)));
+    return card;
+  }
+
+  /** The fields that make each kind of destination. */
+  private destBody(d: Destination, lands: HTMLElement | null): (HTMLElement | null)[] {
+    const s = this.state!;
+    const mac = s.platform === "macos";
     const cmdIn = input(d.mount_cmd, (v) => { d.mount_cmd = v; this.setDirty(); }, { class: "input mono", placeholder: "mount /mnt/nas" });
-    const showAdv = !!(d.mount_cmd);
-    const adv = h("div", { class: "adv", style: showAdv ? "" : "display:none" }, field("MOUNT COMMAND (OPTIONAL)", cmdIn, "Runs when the folder is missing. Handy on Linux with an fstab entry."));
-    const advLink = noFocus(h("button", { class: "linkish", style: showAdv ? "display:none" : "" }, "Custom mount command…"));
-    advLink.addEventListener("click", () => { adv.style.display = ""; advLink.style.display = "none"; });
-    const fields = h("div", { class: "dest-fields" },
-      h("div", { class: "row", style: "grid-template-columns: 180px 1fr" },
-        field("NAME", input(d.label, (v) => { d.label = v; this.setDirty(); })),
-        field("FOLDER", h("div", { class: "dest-path" }, pathIn, browse))),
-      h("div", { style: "margin-top:10px" }, field("NETWORK SHARE (AUTO-CONNECT)", smbIn, s.platform === "macos"
-        ? "If the folder is missing, the share is mounted with your Keychain login. Folder is then e.g. /Volumes/music/Band."
-        : "Mounted with gio. Folder is then /run/user/<uid>/gvfs/smb-share:server=…,share=…")),
-      advLink, adv, statusText);
-    const side = h("div", { class: "dest-side" },
-      key("REMOVE", () => { p.destinations.splice(i, 1); this.setDirty(); this.renderForm(); }, "red"));
-    return h("div", { class: "dest" + (d.enabled ? "" : " disabled") }, l, fields, side);
+    const advanced = (extra: HTMLElement | null, open: boolean) => {
+      const adv = h("div", { class: "adv", style: open ? "" : "display:none" }, field("MOUNT COMMAND (OPTIONAL)", cmdIn, "Runs whenever the folder is missing. Handy on Linux with an fstab entry."), extra);
+      const link = noFocus(h("button", { class: "linkish", style: open ? "display:none" : "" }, "Advanced…"));
+      link.addEventListener("click", () => { adv.style.display = ""; link.style.display = "none"; });
+      return [link, adv];
+    };
+    if (d.kind === "folder") {
+      const pathIn = input(d.path, (v) => { d.path = v; this.setDirty(); }, { class: "input mono", placeholder: mac ? "/Volumes/USB/Band" : "/media/usb/band" });
+      const browse = key("BROWSE", async () => {
+        const r = await this.api.pickFolder(d.path || s.music_dir);
+        if (r) { d.path = r; pathIn.value = r; this.setDirty(); }
+      });
+      // folders from older versions may still auto-connect a share first
+      const legacy = d.smb_url ? field("CONNECT THIS SHARE FIRST", input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); }, { class: "input mono" })) : null;
+      return [field("FOLDER", h("div", { class: "dest-path" }, pathIn, browse), "A missing last folder is created for you."), ...advanced(legacy, !!(d.mount_cmd || d.smb_url))];
+    }
+    if (d.kind === "share") {
+      const crumbs = h("div", { class: "crumbs" });
+      const draw = () => {
+        clear(crumbs);
+        const u = parseShareUrl(d.smb_url);
+        if (!d.smb_url.trim()) crumbs.append(h("span", { class: "crumb-empty" }, "SERVER  ›  SHARE  ›  FOLDER"));
+        else if (!u) crumbs.append(h("span", { class: "crumb-bad" }, "Start with smb://, then the server, the share and the folder."));
+        else {
+          const parts: [string, string][] = [["SERVER", u.host], ["SHARE", u.share], ...u.sub.map((x): [string, string] => ["FOLDER", x])];
+          parts.forEach(([cap, v], k) => {
+            if (k) crumbs.append(h("span", { class: "crumb-sep" }, "›"));
+            crumbs.append(h("span", { class: "crumb" + (k === 0 ? " host" : "") }, h("small", null, cap), v));
+          });
+        }
+      };
+      const urlIn = input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); draw(); }, { class: "input mono", placeholder: "smb://you@nas.local/Music/Band" });
+      draw();
+      return [field("SHARE ADDRESS", urlIn, mac ? "Logs in with your Keychain. Takes land in the folder at the end of the address." : "Logs in with your keyring (gio). Takes land in the folder at the end of the address."),
+        crumbs, lands, ...advanced(null, !!d.mount_cmd)];
+    }
+    return [h("div", { class: "hint" }, "Made by a newer version of PracticeSpaceRecorder. Kept as it is, but this version can't deliver to it.")];
   }
 
   private meters() {

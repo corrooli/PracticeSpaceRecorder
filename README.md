@@ -170,7 +170,7 @@ From now on the app starts exactly like this, every time. Make more presets for 
 ## Recording to a USB stick or external drive
 
 1. Plug in the drive.
-2. In **PRESETS → DESTINATIONS**, add a destination and click the folder button. Pick a folder on the drive, for example `/Volumes/BANDSTICK/Takes` on a Mac or `/media/you/BANDSTICK/Takes` on Linux.
+2. In **PRESETS → DESTINATIONS**, click **+ ADD DESTINATION**, pick **LOCAL FOLDER** and hit **BROWSE**. Pick a folder on the drive, for example `/Volumes/BANDSTICK/Takes` on a Mac or `/media/you/BANDSTICK/Takes` on Linux.
 3. Leave the local folder in there as a second destination. Then there is always a copy on the computer too, in case the stick goes through the washing machine.
 
 Before you pull the stick out, check that the **DELIVERY** LED is green (nothing left to write), then eject it like you normally would. If it's not plugged in, its LED goes red, takes pile up safely on the computer, and they get copied over once the stick is back.
@@ -179,14 +179,15 @@ Before you pull the stick out, check that the **DELIVERY** LED is green (nothing
 
 ## Recording to a NAS or network share
 
-Add a destination and fill in two things:
+Click **+ ADD DESTINATION**, pick **NETWORK SHARE** and paste the address of the folder on your NAS:
 
-| Field | Mac example | Linux example |
-|---|---|---|
-| **Folder** | `/Volumes/music/Band` | `/run/user/1000/gvfs/smb-share:server=nas.local,share=music/Band` |
-| **Network share** | `smb://you@nas.local/music` | `smb://nas.local/music` |
+```
+smb://you@nas.local/music/Band
+```
 
-When the folder isn't there, PracticeSpaceRecorder connects the share for you. On a Mac it uses Finder's mount and your Keychain password (you log in once, then never again). On Linux it uses `gio mount`, or you can set your own **mount command** (for example `mount /mnt/nas` with an fstab entry).
+That's server, share, then the folder inside it. The app splits it up for you right below the field, so typos are easy to spot. Hit **TEST** and it connects the share, writes a test file, reads it back and tells you where takes will land (and how much room is left).
+
+Connecting happens by itself whenever the share is missing. On a Mac it uses Finder's mount and your Keychain password (you log in once, then never again). On Linux it uses `gio mount`, or you can set your own **mount command** under **Advanced…** (for example `mount /mnt/nas` with an fstab entry).
 
 And if the NAS is off, asleep, or someone tripped over the network cable: **keep recording**. Takes wait in the local buffer, the status LED turns red, and everything is delivered the moment the share is back.
 

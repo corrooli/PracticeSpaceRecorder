@@ -1,6 +1,6 @@
 [package]
 name = "practice-space-recorder"
-version = "1.0.0"
+version = "1.1.0"
 description = "Press space. Play loud. Press space. Your take is already on the NAS."
 authors = ["corrooli"]
 license = "AGPL-3.0-or-later"
@@ -42,3 +42,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+tokio-tungstenite = "0.24"

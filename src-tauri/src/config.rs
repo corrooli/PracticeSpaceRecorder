@@ -35,24 +35,72 @@ impl Format {
     }
 }
 
+/// What a destination is. Every kind has its own fields in the UI and its own
+/// way to check, test and deliver (see `dest::locate`, `jobs::deliver`). New
+/// kinds (Telegram, ...) are added here first.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DestKind {
+    /// A folder on this machine: internal disk, USB stick, an already mounted share.
+    #[default]
+    Folder,
+    /// A network share, found (and connected) from `smb_url`.
+    Share,
+    /// Written by a newer version of the app. Kept as is, never delivered to.
+    #[serde(other)]
+    Unsupported,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Destination {
     pub id: String,
+    pub kind: DestKind,
     pub label: String,
-    /// Folder the takes land in (local folder or mounted share).
+    /// Folder: where takes land.
     pub path: String,
-    /// Optional `smb://user@host/share`; mounted automatically when `path` is missing.
+    /// Share: `smb://user@host/share/folder`. On a Folder it only auto-mounts (old configs).
     pub smb_url: String,
     /// Optional shell command that makes `path` available (e.g. `mount /mnt/nas`).
     pub mount_cmd: String,
     pub enabled: bool,
 }
 
+impl Destination {
+    /// Enabled and pointing somewhere this version can deliver to.
+    pub fn usable(&self) -> bool {
+        self.enabled
+            && match self.kind {
+                DestKind::Folder => !self.path.trim().is_empty() || !self.smb_url.trim().is_empty(),
+                DestKind::Share => !self.smb_url.trim().is_empty(),
+                DestKind::Unsupported => false,
+            }
+    }
+
+    /// Configs from before kinds existed: only a share URL means a share.
+    pub fn normalize(&mut self) {
+        if self.kind == DestKind::Folder && self.path.trim().is_empty() && !self.smb_url.trim().is_empty() {
+            self.kind = DestKind::Share;
+        }
+    }
+
+    /// What to call it in the UI.
+    pub fn display_name(&self) -> String {
+        if !self.label.trim().is_empty() {
+            self.label.clone()
+        } else if !self.path.trim().is_empty() {
+            self.path.clone()
+        } else {
+            self.smb_url.clone()
+        }
+    }
+}
+
 impl Default for Destination {
     fn default() -> Self {
         Destination {
             id: new_id("d"),
+            kind: DestKind::Folder,
             label: "Local".into(),
             path: default_music_dir().to_string_lossy().into_owned(),
             smb_url: String::new(),
@@ -170,15 +218,30 @@ impl Default for Settings {
 pub struct Store {
     pub settings: Settings,
     pub presets: Vec<Preset>,
+    /// Where this store lives on disk. Not part of the file itself.
+    #[serde(skip)]
+    pub path: PathBuf,
 }
 
 impl Store {
-    pub fn load() -> Store {
-        let path = config_dir().join("config.json");
-        let mut s: Store = fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).map_err(|e| log::error!("config.json unreadable: {e}")).ok())
-            .unwrap_or_default();
+    /// Load `path`, repairing whatever is missing. Never fails: a broken file
+    /// is kept next to it as `config.json.broken` and the app boots on defaults.
+    pub fn load(path: &Path) -> Store {
+        let mut s: Store = match fs::read(path) {
+            Ok(b) => match serde_json::from_slice(&b) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("{} unreadable: {e}", path.display());
+                    let _ = fs::copy(path, path.with_extension("json.broken"));
+                    Store::default()
+                }
+            },
+            Err(_) => Store::default(),
+        };
+        s.path = path.to_path_buf();
+        for d in s.presets.iter_mut().flat_map(|p| p.destinations.iter_mut()) {
+            d.normalize();
+        }
         if s.presets.is_empty() {
             s.presets.push(Preset::default());
         }
@@ -190,7 +253,7 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<()> {
-        write_atomic(&config_dir().join("config.json"), &serde_json::to_vec_pretty(self)?)
+        write_atomic(&self.path, &serde_json::to_vec_pretty(self)?)
     }
 
     pub fn active(&self) -> &Preset {
@@ -202,10 +265,41 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, data)?;
+    let mut name = path.file_name().ok_or_else(|| anyhow::anyhow!("no file name: {}", path.display()))?.to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    {
+        // fsync before rename: after a power cut you get the old file or the new
+        // one, never an empty one.
+        use std::io::Write;
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        sync_file(&f)?;
+    }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// fsync, without failing on file systems that can't. SMB shares on macOS reject
+/// `F_FULLFSYNC` (what `sync_all` does there) with ENOTSUP: every write is
+/// already with the server by then, so that is not an error worth losing a take over.
+pub fn sync_file(f: &fs::File) -> std::io::Result<()> {
+    match f.sync_all() {
+        Err(e) if sync_unsupported(&e) => match f.sync_data() {
+            Err(e) if sync_unsupported(&e) => Ok(()),
+            r => r,
+        },
+        r => r,
+    }
+}
+
+/// "This file system doesn't do fsync", as opposed to a real I/O error.
+pub fn sync_unsupported(e: &std::io::Error) -> bool {
+    #[cfg(target_os = "macos")]
+    const CODES: &[i32] = &[45, 102]; // ENOTSUP, EOPNOTSUPP
+    #[cfg(not(target_os = "macos"))]
+    const CODES: &[i32] = &[22, 95]; // EINVAL (special files), EOPNOTSUPP
+    e.kind() == std::io::ErrorKind::Unsupported || e.raw_os_error().is_some_and(|c| CODES.contains(&c))
 }
 
 pub fn config_dir() -> PathBuf {
@@ -265,22 +359,235 @@ pub fn expand_template(tpl: &str, preset: &str, take: u32, now: chrono::DateTime
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn template() {
-        let now = chrono::Local::now();
-        let p = expand_template("{date}/x: {preset} {take}", "Band/Practice", 3, now);
-        assert_eq!(p.components().count(), 2);
-        assert!(p.to_string_lossy().ends_with("x- Band-Practice 03"));
+    use crate::testutil::TempDir;
+    use chrono::TimeZone;
+
+    fn at(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> chrono::DateTime<chrono::Local> {
+        chrono::Local.with_ymd_and_hms(y, mo, d, h, mi, s).unwrap()
     }
+
+    fn preset(mode: Mode, channels: Vec<u16>) -> Preset {
+        Preset { mode, channels, ..Preset::default() }
+    }
+
     #[test]
-    fn channels() {
-        let mut p = Preset::default();
-        p.mode = Mode::Stereo;
-        p.channels = vec![3, 4];
-        assert_eq!(p.selected_channels(8), vec![2, 3]);
-        assert_eq!(p.selected_channels(2), vec![1, 1]);
+    fn format_bits() {
+        assert_eq!((Format::Wav16.bits(), Format::Wav16.is_float()), (16, false));
+        assert_eq!((Format::Wav24.bits(), Format::Wav24.is_float()), (24, false));
+        assert_eq!((Format::Wav32f.bits(), Format::Wav32f.is_float()), (32, true));
+    }
+
+    #[test]
+    fn template_all_tokens() {
+        let p = expand_template("{year}/{month}/{day}/{date} {time} {preset} {take}", "Band", 7, at(2026, 3, 4, 5, 6, 7));
+        let parts: Vec<_> = p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        assert_eq!(parts, ["2026", "03", "04", "2026-03-04 05-06-07 Band 07"]);
+    }
+
+    #[test]
+    fn template_sanitizes_and_drops_empty_parts() {
+        let now = at(2026, 1, 2, 3, 4, 5);
+        let p = expand_template("{date}/x: {preset} {take}", "Band/Practice", 3, now);
+        assert_eq!(p, PathBuf::from("2026-01-02").join("x- Band-Practice 03"));
+        // backslashes split too, empty parts vanish, ".." can't escape
+        assert_eq!(expand_template("a\\\\b//c", "", 1, now), PathBuf::from("a").join("b").join("c"));
+        assert_eq!(expand_template("../../etc/{preset}", "x", 1, now), PathBuf::from("untitled").join("untitled").join("etc").join("x"));
+    }
+
+    #[test]
+    fn template_fallbacks() {
+        let now = at(2026, 1, 2, 3, 4, 5);
+        assert_eq!(expand_template("   ", "P", 1, now), PathBuf::from("2026-01-02 03-04-05 P"));
+        assert_eq!(expand_template("/ /", "P", 1, now), PathBuf::from("take"));
+        assert_eq!(expand_template("{take}", "P", 123, now), PathBuf::from("123"));
+    }
+
+    #[test]
+    fn sanitize_cases() {
+        assert_eq!(sanitize("a/b\\c:d*e?f\"g<h>i|j"), "a-b-c-d-e-f-g-h-i-j");
+        assert_eq!(sanitize("tab\there"), "tab-here");
+        assert_eq!(sanitize("  ..hidden.. "), "hidden");
+        assert_eq!(sanitize(""), "untitled");
+        assert_eq!(sanitize("..."), "untitled");
+        assert_eq!(sanitize("Grüße 🎸"), "Grüße 🎸");
+    }
+
+    #[test]
+    fn mono_channels() {
+        assert_eq!(preset(Mode::Mono, vec![3]).selected_channels(8), vec![2]);
+        assert_eq!(preset(Mode::Mono, vec![9]).selected_channels(2), vec![1]);
+        assert_eq!(preset(Mode::Mono, vec![0]).selected_channels(2), vec![0]);
+        assert_eq!(preset(Mode::Mono, vec![]).selected_channels(2), vec![0]);
+        assert_eq!(preset(Mode::Mono, vec![1]).selected_channels(0), vec![0]);
+    }
+
+    #[test]
+    fn stereo_channels() {
+        assert_eq!(preset(Mode::Stereo, vec![3, 4]).selected_channels(8), vec![2, 3]);
+        assert_eq!(preset(Mode::Stereo, vec![3, 4]).selected_channels(2), vec![1, 1]);
+        assert_eq!(preset(Mode::Stereo, vec![5]).selected_channels(8), vec![4, 5]);
+        assert_eq!(preset(Mode::Stereo, vec![]).selected_channels(8), vec![0, 1]);
+        assert_eq!(preset(Mode::Stereo, vec![1, 2]).selected_channels(1), vec![0, 0]);
+    }
+
+    #[test]
+    fn multitrack_channels() {
+        assert_eq!(preset(Mode::Multitrack, vec![]).selected_channels(4), vec![0, 1, 2, 3]);
+        assert_eq!(preset(Mode::Multitrack, vec![2, 2, 4, 9, 0]).selected_channels(4), vec![1, 3]);
+        assert_eq!(preset(Mode::Multitrack, vec![9]).selected_channels(2), vec![0, 1]);
+        assert_eq!(preset(Mode::Multitrack, vec![]).selected_channels(0), vec![0]);
+    }
+
+    #[test]
+    fn track_names() {
+        let mut p = preset(Mode::Stereo, vec![1, 2]);
+        assert_eq!((p.track_name(0, 0), p.track_name(1, 1)), ("Left".into(), "Right".into()));
+        p.mode = Mode::Mono;
+        assert_eq!(p.track_name(0, 4), "Mono");
         p.mode = Mode::Multitrack;
-        p.channels = vec![];
-        assert_eq!(p.selected_channels(4), vec![0, 1, 2, 3]);
+        assert_eq!(p.track_name(0, 4), "In 5");
+        p.track_names = vec!["Kick".into(), "  ".into()];
+        assert_eq!(p.track_name(0, 0), "Kick");
+        assert_eq!(p.track_name(1, 1), "In 2");
+        assert_eq!(p.track_name(5, 7), "In 8");
+    }
+
+    #[test]
+    fn defaults_are_sane() {
+        let p = Preset::default();
+        assert_eq!(p.destinations.len(), 1);
+        assert!(p.destinations[0].enabled);
+        assert!(p.preroll_secs > 0.0);
+        let s = Settings::default();
+        assert!(s.port >= 1024);
+        assert!(new_id("x").starts_with('x'));
+        assert_ne!(new_id("x"), new_id("x"));
+        assert!(default_music_dir().ends_with("PracticeSpaceRecorder"));
+        assert!(config_dir().ends_with("PracticeSpaceRecorder"));
+        assert!(data_dir().ends_with("PracticeSpaceRecorder"));
+    }
+
+    #[test]
+    fn store_missing_file_boots_with_one_preset() {
+        let d = TempDir::new("cfg");
+        let path = d.join("sub/config.json");
+        let s = Store::load(&path);
+        assert_eq!(s.presets.len(), 1);
+        assert_eq!(s.settings.active_preset, s.presets[0].id);
+        assert!(path.exists(), "load writes the repaired file");
+        assert_eq!(s.active().id, s.presets[0].id);
+    }
+
+    #[test]
+    fn store_round_trip() {
+        let d = TempDir::new("cfg");
+        let path = d.join("config.json");
+        let mut s = Store::load(&path);
+        let p = Preset { name: "Second".into(), ..Preset::default() };
+        s.presets.push(p.clone());
+        s.settings.active_preset = p.id.clone();
+        s.settings.take_counter = 42;
+        s.save().unwrap();
+        let back = Store::load(&path);
+        assert_eq!(back.presets, s.presets);
+        assert_eq!(back.settings, s.settings);
+        assert_eq!(back.active().name, "Second");
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["presets", "settings"], "store path must not be persisted");
+    }
+
+    #[test]
+    fn store_repairs_unknown_active_preset() {
+        let d = TempDir::new("cfg");
+        let path = d.join("config.json");
+        std::fs::write(&path, r#"{"settings":{"active_preset":"gone"},"presets":[{"id":"a","name":"A"}]}"#).unwrap();
+        let s = Store::load(&path);
+        assert_eq!(s.settings.active_preset, "a");
+        // missing fields come from defaults
+        assert_eq!(s.presets[0].sample_rate, 48000);
+        assert_eq!(s.settings.port, 7878);
+    }
+
+    #[test]
+    fn store_active_falls_back_to_first() {
+        let mut s = Store { presets: vec![Preset::default()], ..Default::default() };
+        s.settings.active_preset = "nope".into();
+        assert_eq!(s.active().id, s.presets[0].id);
+    }
+
+    #[test]
+    fn broken_config_is_kept_aside() {
+        let d = TempDir::new("cfg");
+        let path = d.join("config.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        let s = Store::load(&path);
+        assert_eq!(s.presets.len(), 1);
+        assert_eq!(std::fs::read(d.join("config.json.broken")).unwrap(), b"{ this is not json");
+        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn save_reports_errors() {
+        let d = TempDir::new("cfg");
+        std::fs::write(d.join("file"), b"x").unwrap();
+        // parent is a file -> cannot create folder
+        let s = Store { path: d.join("file/config.json"), ..Default::default() };
+        assert!(s.save().is_err());
+        assert!(Store::default().save().is_err(), "empty path");
+    }
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_temp() {
+        let d = TempDir::new("cfg");
+        let f = d.join("a/b.json");
+        write_atomic(&f, b"one").unwrap();
+        write_atomic(&f, b"two").unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(d.join("a")).unwrap().count(), 1);
+        assert!(write_atomic(Path::new("/"), b"x").is_err());
+    }
+
+    #[test]
+    fn fsync_unsupported_is_not_an_error() {
+        use std::io::{Error, ErrorKind};
+        assert!(sync_unsupported(&Error::from(ErrorKind::Unsupported)));
+        #[cfg(target_os = "macos")]
+        assert!(sync_unsupported(&Error::from_raw_os_error(45)), "ENOTSUP from SMB");
+        #[cfg(not(target_os = "macos"))]
+        assert!(sync_unsupported(&Error::from_raw_os_error(95)));
+        assert!(!sync_unsupported(&Error::from_raw_os_error(5)), "EIO is real");
+        assert!(!sync_unsupported(&Error::from(ErrorKind::PermissionDenied)));
+        let d = TempDir::new("cfg");
+        let f = fs::File::create(d.join("x")).unwrap();
+        sync_file(&f).unwrap();
+    }
+
+    #[test]
+    fn destination_kinds() {
+        let d: Destination = serde_json::from_str(r#"{"path":"/x"}"#).unwrap();
+        assert_eq!(d.kind, DestKind::Folder, "old configs default to folder");
+        let mut d: Destination = serde_json::from_str(r#"{"path":"","smb_url":"smb://nas/s"}"#).unwrap();
+        d.normalize();
+        assert_eq!(d.kind, DestKind::Share, "URL only: a share");
+        let mut d: Destination = serde_json::from_str(r#"{"path":"/Volumes/s/Band","smb_url":"smb://nas/s"}"#).unwrap();
+        d.normalize();
+        assert_eq!(d.kind, DestKind::Folder, "folder + URL keeps its folder");
+        assert!(d.usable());
+        let d: Destination = serde_json::from_str(r#"{"kind":"telegram","path":"/x","chat":"123"}"#).unwrap();
+        assert_eq!(d.kind, DestKind::Unsupported, "newer kinds don't break the config");
+        assert!(!d.usable());
+        let d = Destination { kind: DestKind::Share, path: "/ignored".into(), smb_url: "".into(), ..Default::default() };
+        assert!(!d.usable(), "a share needs its URL");
+        assert_eq!(serde_json::to_value(DestKind::Share).unwrap(), "share");
+    }
+
+    #[test]
+    fn store_load_migrates_destinations() {
+        let d = TempDir::new("cfg");
+        let path = d.join("config.json");
+        std::fs::write(&path, r#"{"presets":[{"id":"a","destinations":[{"id":"x","path":"","smb_url":"smb://nas/s/t"}]}]}"#).unwrap();
+        assert_eq!(Store::load(&path).presets[0].destinations[0].kind, DestKind::Share);
     }
 }

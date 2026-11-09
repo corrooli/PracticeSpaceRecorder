@@ -5,7 +5,7 @@
 const DB_RANGE = 48;
 const LIVE_SECONDS = 30;
 
-class Pyramid {
+export class Pyramid {
   levels: Uint8Array[] = [new Uint8Array(4096)];
   lens: number[] = [0];
 
@@ -66,7 +66,7 @@ class Pyramid {
   }
 }
 
-class Ring {
+export class Ring {
   buf: Uint8Array;
   head = 0;
   len = 0;

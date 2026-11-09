@@ -1,8 +1,12 @@
 export type Mode = "mono" | "stereo" | "multitrack";
 export type Format = "wav16" | "wav24" | "wav32f";
 
+/** Rust: DestKind. "unsupported" = made by a newer version. */
+export type DestKind = "folder" | "share" | "unsupported";
+
 export interface Destination {
   id: string;
+  kind: DestKind;
   label: string;
   path: string;
   smb_url: string;
@@ -110,6 +114,14 @@ export interface AppState {
   remote: { port: number; urls: string[]; qr: string; clients: number; enabled: boolean };
   music_dir: string;
   platform: string;
+}
+
+/** Answer to the TEST button of a destination. */
+export interface DestTest {
+  ok: boolean;
+  msg: string;
+  path: string;
+  free: number;
 }
 
 export interface LiveMsg {

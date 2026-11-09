@@ -23,9 +23,18 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, llvm-tools-preview
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: npm ci
       - run: npm run build
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - name: UI tests (coverage gate in vitest.config.ts)
+        run: npm run coverage
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      # device.rs (sound card), lib.rs (window) and main.rs need real hardware / a
+      # display; everything else is gated.
+      - name: Rust tests + coverage gate
+        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --ignore-filename-regex '(device|lib|main|testutil)\.rs' --fail-under-lines 97
