@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 290" width="880" height="290" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#ffb048"/>
+    </marker>
+    <style>
+      .l { fill: none; stroke: #e8e4f0; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+      .f { fill: #1e1d24; }
+      .t { fill: #c9c3d6; font-size: 12px; letter-spacing: 2px; font-weight: 700; text-anchor: middle; }
+      .s { fill: #8a8499; font-size: 13px; text-anchor: middle; }
+      .h { fill: #ffb048; font-size: 14px; letter-spacing: 3px; font-weight: 700; }
+      .ar { fill: none; stroke: #ffb048; stroke-width: 2.5; stroke-linecap: round; }
+      .walk { fill: none; stroke: #ffb048; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 1 8; animation: m 1.2s linear infinite; }
+      .note { fill: #ffb048; font-size: 24px; text-anchor: middle; }
+      @keyframes m { to { stroke-dashoffset: -18; } }
+      @media (prefers-reduced-motion: reduce) { .walk { animation: none; } }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="878" height="288" rx="16" fill="#121116" stroke="#2b2a31" stroke-width="2"/>
+  <text x="32" y="44" class="h">THE USB STICK  (MOST BANDS)</text>
+
+  <!-- audio interface -->
+  <text x="88" y="104" class="note">♪</text>
+  <text x="140" y="92" class="note">♫</text>
+  <rect x="45" y="125" width="140" height="52" rx="7" class="l f"/>
+  <circle cx="72" cy="151" r="9" class="l"/><circle cx="72" cy="151" r="3" fill="#e8e4f0"/>
+  <circle cx="100" cy="151" r="9" class="l"/><circle cx="100" cy="151" r="3" fill="#e8e4f0"/>
+  <circle cx="135" cy="146" r="7" class="l"/><line x1="135" y1="146" x2="135" y2="140" class="l"/>
+  <circle cx="163" cy="146" r="7" class="l"/><line x1="163" y1="146" x2="168" y2="142" class="l"/>
+  <circle cx="135" cy="166" r="2.5" fill="#5fd38a"/><circle cx="163" cy="166" r="2.5" fill="#5fd38a"/>
+  <text x="115" y="234" class="t">AUDIO INTERFACE</text>
+  <text x="115" y="254" class="s">the band goes in here</text>
+
+  <line x1="196" y1="151" x2="244" y2="151" class="ar" marker-end="url(#arrow)"/>
+
+  <!-- recording computer -->
+  <rect x="265" y="92" width="140" height="88" rx="7" class="l f"/>
+  <polyline points="280,130 288,122 294,138 300,114 306,144 312,126 318,134 326,110 332,150 338,120 344,140 350,128 358,116 364,142 370,124 378,134 390,130" fill="none" stroke="#ffb048" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="392" cy="104" r="5" fill="#ff4a32"/>
+  <path d="M250 180 H420 L410 194 H260 Z" class="l f"/>
+  <text x="335" y="234" class="t">RECORDING COMPUTER</text>
+  <text x="335" y="254" class="s">space to start, space to stop</text>
+
+  <line x1="428" y1="151" x2="484" y2="151" class="ar" marker-end="url(#arrow)"/>
+
+  <!-- usb stick -->
+  <rect x="496" y="140" width="22" height="22" rx="2" class="l"/>
+  <rect x="502" y="146" width="4" height="4" fill="#e8e4f0"/><rect x="508" y="152" width="4" height="4" fill="#e8e4f0"/>
+  <rect x="518" y="130" width="86" height="42" rx="9" class="l f"/>
+  <rect x="530" y="143" width="50" height="16" rx="3" fill="#ffb048"/>
+  <text x="555" y="155" font-size="10" font-weight="700" letter-spacing="1.5" fill="#121116" text-anchor="middle">TAKES</text>
+  <text x="550" y="234" class="t">USB STICK OR SSD</text>
+  <text x="550" y="254" class="s">plugged into the computer</text>
+
+  <!-- walk home -->
+  <path d="M616 136 Q656 84 696 136" class="walk" marker-end="url(#arrow)"/>
+  <text x="656" y="82" class="s">after practice</text>
+
+  <!-- home -->
+  <path d="M714 196 V148 L766 104 L818 148 V196 Z" class="l f"/>
+  <rect x="753" y="164" width="26" height="32" rx="2" class="l"/>
+  <circle cx="766" cy="138" r="11" class="l"/>
+  <text x="766" y="145" font-size="17" fill="#ffb048" text-anchor="middle">♪</text>
+  <text x="766" y="234" class="t">HOME</text>
+  <text x="766" y="254" class="s">listen back, judge the solo</text>
+</svg>

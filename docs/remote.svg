@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 290" width="880" height="290" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#ffb048"/>
+    </marker>
+    <style>
+      .l { fill: none; stroke: #e8e4f0; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+      .f { fill: #1e1d24; }
+      .q { fill: #e8e4f0; }
+      .t { fill: #c9c3d6; font-size: 12px; letter-spacing: 2px; font-weight: 700; text-anchor: middle; }
+      .s { fill: #8a8499; font-size: 13px; text-anchor: middle; }
+      .h { fill: #ffb048; font-size: 14px; letter-spacing: 3px; font-weight: 700; }
+      .flow { fill: none; stroke: #ffb048; stroke-width: 2.5; stroke-linecap: round; stroke-dasharray: 1 8; animation: m 1.2s linear infinite; }
+      .wifi { fill: none; stroke: #ffb048; stroke-width: 3; stroke-linecap: round; }
+      .w1 { animation: p 1.8s ease-in-out infinite; }
+      .w2 { animation: p 1.8s ease-in-out 0.3s infinite; }
+      .w3 { animation: p 1.8s ease-in-out 0.6s infinite; }
+      .rec { fill: #ff4a32; stroke: #ffb3a8; stroke-width: 2; }
+      @keyframes m { to { stroke-dashoffset: -18; } }
+      @keyframes p { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+      @media (prefers-reduced-motion: reduce) { .flow, .w1, .w2, .w3 { animation: none; } }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="878" height="288" rx="16" fill="#121116" stroke="#2b2a31" stroke-width="2"/>
+  <text x="32" y="44" class="h">THE REMOTE</text>
+
+  <!-- recording computer showing a QR code -->
+  <rect x="60" y="92" width="140" height="88" rx="7" class="l f"/>
+  <rect x="98" y="102" width="64" height="68" rx="3" fill="#121116"/>
+  <g transform="translate(102 106)">
+    <rect x="1.5" y="1.5" width="18" height="18" fill="none" stroke="#e8e4f0" stroke-width="3"/>
+    <rect x="6" y="6" width="9" height="9" class="q"/>
+    <rect x="37.5" y="1.5" width="18" height="18" fill="none" stroke="#e8e4f0" stroke-width="3"/>
+    <rect x="42" y="6" width="9" height="9" class="q"/>
+    <rect x="1.5" y="39.5" width="18" height="18" fill="none" stroke="#e8e4f0" stroke-width="3"/>
+    <rect x="6" y="44" width="9" height="9" class="q"/>
+    <rect x="24" y="0" width="6" height="6" class="q"/>
+    <rect x="30" y="12" width="6" height="6" class="q"/>
+    <rect x="24" y="18" width="6" height="6" class="q"/>
+    <rect x="0" y="24" width="6" height="6" class="q"/>
+    <rect x="12" y="24" width="12" height="6" class="q"/>
+    <rect x="30" y="24" width="6" height="12" class="q"/>
+    <rect x="42" y="24" width="6" height="6" class="q"/>
+    <rect x="48" y="30" width="9" height="6" class="q"/>
+    <rect x="6" y="30" width="6" height="6" class="q"/>
+    <rect x="18" y="36" width="6" height="6" class="q"/>
+    <rect x="24" y="42" width="6" height="6" class="q"/>
+    <rect x="36" y="42" width="12" height="6" class="q"/>
+    <rect x="30" y="48" width="6" height="9" class="q"/>
+    <rect x="42" y="51" width="6" height="6" class="q"/>
+    <rect x="51" y="45" width="6" height="12" class="q"/>
+    <rect x="24" y="54" width="6" height="3" class="q"/>
+  </g>
+  <path d="M45 180 H215 L205 194 H55 Z" class="l f"/>
+  <text x="130" y="234" class="t">RECORDING COMPUTER</text>
+  <text x="130" y="254" class="s">shows a QR code in SETUP</text>
+
+  <!-- wifi -->
+  <line x1="226" y1="146" x2="270" y2="146" class="flow" marker-start="url(#arrow)"/>
+  <g transform="translate(310 160)">
+    <path d="M-34 -30 A48 48 0 0 1 34 -30" class="wifi w3"/>
+    <path d="M-22 -18 A31 31 0 0 1 22 -18" class="wifi w2"/>
+    <path d="M-10 -6 A14 14 0 0 1 10 -6" class="wifi w1"/>
+    <circle cx="0" cy="4" r="4" fill="#ffb048"/>
+  </g>
+  <line x1="350" y1="146" x2="404" y2="146" class="flow" marker-start="url(#arrow)"/>
+  <text x="310" y="234" class="t">SAME WI-FI</text>
+  <text x="310" y="254" class="s">no app, no account</text>
+
+  <!-- phone -->
+  <rect x="420" y="104" width="48" height="86" rx="9" class="l f"/>
+  <rect x="430" y="116" width="28" height="6" rx="3" fill="#ffb048"/>
+  <circle cx="444" cy="152" r="14" class="rec"/>
+  <text x="444" y="234" class="t">PHONE</text>
+
+  <!-- tablet -->
+  <rect x="510" y="102" width="120" height="88" rx="10" class="l f"/>
+  <rect x="540" y="114" width="60" height="7" rx="3.5" fill="#ffb048"/>
+  <circle cx="570" cy="153" r="22" class="rec"/>
+  <text x="570" y="234" class="t">TABLET</text>
+
+  <!-- old laptop -->
+  <rect x="682" y="98" width="118" height="78" rx="7" class="l f"/>
+  <rect x="711" y="108" width="60" height="7" rx="3.5" fill="#ffb048"/>
+  <circle cx="741" cy="144" r="18" class="rec"/>
+  <path d="M668 176 H814 L805 190 H677 Z" class="l f"/>
+  <text x="741" y="234" class="t">THAT OLD LAPTOP</text>
+
+  <text x="600" y="254" class="s">anything with a browser becomes the record button</text>
+</svg>
