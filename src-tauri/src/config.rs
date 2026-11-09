@@ -81,6 +81,8 @@ pub struct Destination {
     pub mount_cmd: String,
     pub enabled: bool,
     pub encoding: Encoding,
+    /// Auto master (loudness + limiter) for files people listen to. On unless switched off.
+    pub master: bool,
     /// MP3 bitrate in kbps (one of [`BITRATES`]).
     pub bitrate: u32,
     /// Telegram bot token. Write-only: clients only ever see [`mask_token`].
@@ -169,6 +171,7 @@ impl Default for Destination {
             mount_cmd: String::new(),
             enabled: true,
             encoding: Encoding::Wav,
+            master: true,
             bitrate: 192,
             token: String::new(),
             chat_id: String::new(),
@@ -673,6 +676,10 @@ mod tests {
         let mut d = d;
         d.normalize();
         assert_eq!(d.bitrate, 192, "unknown bitrates fall back");
+        let d: Destination = serde_json::from_str(r#"{"path":"/x"}"#).unwrap();
+        assert!(d.master, "auto master is opt-out, also for presets from before it existed");
+        let d: Destination = serde_json::from_str(r#"{"path":"/x","master":false}"#).unwrap();
+        assert!(!d.master);
         let mut d: Destination = serde_json::from_str(r#"{"encoding":"mp3","bitrate":320}"#).unwrap();
         d.normalize();
         assert_eq!((d.encoding, d.bitrate), (Encoding::Mp3, 320));

@@ -15,6 +15,8 @@ export interface Destination {
   mount_cmd: string;
   enabled: boolean;
   encoding: Encoding;
+  /** Auto master: loudness + limiter on files people listen to. */
+  master: boolean;
   /** MP3 kbps. */
   bitrate: number;
   /** Write-only: the recorder sends back a mask ("••••abcd"), never the token. */

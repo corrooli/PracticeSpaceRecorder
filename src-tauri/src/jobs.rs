@@ -3,7 +3,7 @@
 //! backoff forever, survive restarts (jobs.json) and never block recording.
 
 use crate::config::{sanitize, write_atomic, DestKind, Destination, Encoding, Format};
-use crate::encode::{render, spool_frames, Layout, Mp3Writer, Sink, SpoolReader, Tags};
+use crate::encode::{analyze, masters, render, spool_frames, Layout, Mp3Writer, Sink, SpoolReader, Tags};
 use crate::wav::WavWriter;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -362,6 +362,13 @@ fn deliver_files(job: &Job, dest: &Destination, progress: &mut dyn FnMut(f32)) -
         (false, true) => (Layout::Mix, crate::encode::mix_channels(n)),
         (false, false) => (Layout::AsRecorded, n as u16),
     };
+    // auto master: measure first (nothing written yet), then process while rendering
+    let gain = if dest.master && masters(layout, n) {
+        Some(analyze(SpoolReader::open(&job.raw, n, 0, frames)?, layout, m.sample_rate, &mut |f| progress(f * 0.3))?)
+    } else {
+        None
+    };
+    let pre = if gain.is_some() { 0.3 } else { 0.0 };
     let year = chrono::DateTime::from_timestamp_millis(m.started_at).unwrap_or_default().with_timezone(&chrono::Local).format("%Y").to_string();
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
     for (_, tmp, title) in &outputs {
@@ -380,7 +387,8 @@ fn deliver_files(job: &Job, dest: &Destination, progress: &mut dyn FnMut(f32)) -
         }
     }
     let rd = SpoolReader::open(&job.raw, n, 0, frames)?;
-    if let Err(e) = render(rd, layout, sinks, &mut |f| progress(f * 0.98)) {
+    let master = gain.map(|g| crate::master::Master::new(m.sample_rate, ch as usize, g));
+    if let Err(e) = render(rd, layout, sinks, master, &mut |f| progress(pre + f * (0.98 - pre))) {
         cleanup(&outputs);
         return Err(e);
     }
@@ -470,6 +478,72 @@ mod tests {
         let mut m = meta(&["L", "R"], vec![ds.clone()]);
         m.sample_rate = 0;
         assert!(deliver(&Job::new(r, m, 48_000), &ds, 0, &mut |_| {}).unwrap_err().starts_with("Cannot write"));
+    }
+
+    /// 16 bit WAV samples after the header, as floats.
+    fn wav16(path: &str, ch: usize) -> Vec<Vec<f32>> {
+        let b = fs::read(path).unwrap();
+        let data = b.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let s: Vec<f32> = b[data..].chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).collect();
+        (0..ch).map(|c| s.iter().skip(c).step_by(ch).copied().collect()).collect()
+    }
+
+    fn quiet_take(path: &Path, ch: usize) {
+        // 4 s of 440 Hz at -30 dBFS: way too quiet to enjoy
+        let mut b = Vec::new();
+        for i in 0..192_000 {
+            let v = 0.0316 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin();
+            for _ in 0..ch {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        fs::write(path, b).unwrap();
+    }
+
+    fn peak(x: &[f32]) -> f32 {
+        x.iter().fold(0f32, |m, v| m.max(v.abs()))
+    }
+
+    #[test]
+    fn auto_master_makes_listening_files_loud_and_leaves_stems_alone() {
+        let d = TempDir::new("jobs");
+        let r = d.join("q.raw");
+        quiet_take(&r, 2);
+        let mut m = meta(&["L", "R"], vec![]);
+        m.format = Format::Wav16;
+        let on = dest(d.join("on").to_string_lossy());
+        let mut seen = vec![];
+        let out = deliver(&Job::new(r.clone(), m.clone(), 192_000), &on, 0, &mut |p| if let Progress::Fraction(f) = p { seen.push(f) }).unwrap();
+        let s = wav16(&out, 2);
+        assert_eq!(s[0].len(), 192_000, "same length");
+        // -30 dBFS sine (-33 LUFS) goes up to about -14 LUFS: peaks near -11 dBFS
+        let p = peak(&s[0][24_000..]);
+        assert!(p > 0.2 && p < 0.35, "{p}");
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]) && seen.iter().any(|&f| f > 0.3), "analysis, then render");
+        // switched off: bit for bit what was recorded
+        let off = Destination { master: false, ..dest(d.join("off").to_string_lossy()) };
+        let s = wav16(&deliver(&Job::new(r.clone(), m.clone(), 192_000), &off, 0, &mut |_| {}).unwrap(), 2);
+        assert!((peak(&s[0]) - 0.0316).abs() < 0.0002);
+        // split tracks are for mixing: untouched
+        let mut split = m.clone();
+        split.split_tracks = true;
+        let dir = deliver(&Job::new(r.clone(), split, 192_000), &on, 0, &mut |_| {}).unwrap();
+        let l = wav16(&Path::new(&dir).join("01 L.wav").to_string_lossy(), 1);
+        assert!((peak(&l[0]) - 0.0316).abs() < 0.0002);
+        // a multichannel WAV is for mixing too
+        let r3 = d.join("q3.raw");
+        quiet_take(&r3, 3);
+        let mut m3 = meta(&["A", "B", "C"], vec![]);
+        m3.format = Format::Wav16;
+        let s = wav16(&deliver(&Job::new(r3.clone(), m3.clone(), 192_000), &on, 0, &mut |_| {}).unwrap(), 3);
+        assert!((peak(&s[2]) - 0.0316).abs() < 0.0002);
+        // but its MP3 is a stereo mix to listen to: mastered (no soft clip before the limiter)
+        let mp3 = Destination { encoding: Encoding::Mp3, ..on.clone() };
+        let out = deliver(&Job::new(r3, m3, 192_000), &mp3, 0, &mut |_| {}).unwrap();
+        assert!(out.ends_with(".mp3"));
+        // a missing spool fails in the analysis, before anything is written
+        let gone = Job::new(d.join("gone.raw"), m, 192_000);
+        assert!(deliver(&gone, &on, 0, &mut |_| {}).unwrap_err().starts_with("Spool file missing"));
     }
 
     fn tg_dest(enc: Encoding) -> Destination {

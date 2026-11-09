@@ -5,6 +5,7 @@ mod device;
 mod encode;
 mod engine;
 mod jobs;
+mod master;
 mod server;
 mod telegram;
 mod wav;

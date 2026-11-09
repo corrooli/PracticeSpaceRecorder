@@ -5,7 +5,7 @@
 //! from ureq's errors is passed on verbatim for that reason.
 
 use crate::config::{sanitize, DestKind, Destination, Encoding, BITRATES};
-use crate::encode::{mix_channels, render, Layout, Mp3Writer, Sink, SpoolReader, Tags};
+use crate::encode::{analyze, mix_channels, render, Layout, Mp3Writer, Sink, SpoolReader, Tags};
 use crate::jobs::{Job, Progress};
 use crate::wav::WavWriter;
 use serde::Serialize;
@@ -308,6 +308,13 @@ pub fn deliver(job: &Job, dest: &Destination, sent: u32, progress: &mut dyn FnMu
     let frames = crate::encode::spool_frames(&job.raw, n)?;
     let ch = mix_channels(n);
     let p = plan(dest.encoding, dest.bitrate, frames, m.sample_rate, ch, m.format.bits());
+    // one gain for the whole take, so parts sound the same
+    let gain = if dest.master && sent < p.parts {
+        Some(analyze(SpoolReader::open(&job.raw, n, 0, frames)?, Layout::Mix, m.sample_rate, &mut |f| progress(Progress::Fraction(0.1 * f)))?)
+    } else {
+        None
+    };
+    let pre = if gain.is_some() { 0.1 } else { 0.0 };
     let bot = Bot::new(&dest.token);
     let ext = if p.kbps > 0 { "mp3" } else { "wav" };
     let started = chrono::DateTime::from_timestamp_millis(m.started_at).unwrap_or_default().with_timezone(&chrono::Local);
@@ -317,8 +324,8 @@ pub fn deliver(job: &Job, dest: &Destination, sent: u32, progress: &mut dyn FnMu
         let len = p.frames_per_part.min(frames.saturating_sub(start));
         let of = if p.parts > 1 { format!(" ({} of {})", i + 1, p.parts) } else { String::new() };
         let tmp = job.raw.with_file_name(format!("{}.{}.{}.{ext}", job.raw.file_stem().unwrap_or_default().to_string_lossy(), sanitize(&dest.id), i));
-        let base = i as f32 / p.parts as f32;
-        let share = 1.0 / p.parts as f32;
+        let base = pre + (1.0 - pre) * i as f32 / p.parts as f32;
+        let share = (1.0 - pre) / p.parts as f32;
         let tags = Tags { title: format!("{}{of}", m.take_name), artist: m.preset_name.clone(), album: m.preset_name.clone(), year: started.format("%Y").to_string(), comment: "PracticeSpaceRecorder".into() };
         let sink: Box<dyn Sink> = if p.kbps > 0 {
             Box::new(Mp3Writer::create(&tmp, m.sample_rate, ch, p.kbps, &tags).map_err(|e| format!("Cannot write: {e}"))?)
@@ -326,7 +333,8 @@ pub fn deliver(job: &Job, dest: &Destination, sent: u32, progress: &mut dyn FnMu
             Box::new(WavWriter::create(&tmp, m.sample_rate, ch, m.format.bits(), m.format.is_float()).map_err(|e| format!("Cannot write: {e}"))?)
         };
         let rd = SpoolReader::open(&job.raw, n, start, len)?;
-        let res = render(rd, Layout::Mix, vec![sink], &mut |f| progress(Progress::Fraction(base + share * 0.3 * f))).and_then(|_| {
+        let master = gain.map(|g| crate::master::Master::new(m.sample_rate, ch as usize, g));
+        let res = render(rd, Layout::Mix, vec![sink], master, &mut |f| progress(Progress::Fraction(base + share * 0.3 * f))).and_then(|_| {
             let secs = len / m.sample_rate.max(1) as u64;
             let caption = format!("{} \u{b7} {}{of} \u{b7} {} \u{b7} {}", m.preset_name, m.take_name, clock(secs), started.format("%a %-d %b %Y, %H:%M"));
             let file = format!("{name}{of}.{ext}");

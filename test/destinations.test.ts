@@ -14,7 +14,7 @@ describe("destination kinds", () => {
   });
 
   it("new destinations get a name nobody else has", () => {
-    expect(newDestination("folder", [], "a")).toEqual({ id: "a", kind: "folder", label: "Local", path: "", smb_url: "", mount_cmd: "", enabled: true, encoding: "wav", bitrate: 192, token: "", chat_id: "", chat_name: "" });
+    expect(newDestination("folder", [], "a")).toEqual({ id: "a", kind: "folder", label: "Local", path: "", smb_url: "", mount_cmd: "", enabled: true, encoding: "wav", master: true, bitrate: 192, token: "", chat_id: "", chat_name: "" });
     expect(newDestination("telegram", [], "t")).toMatchObject({ kind: "telegram", label: "Band chat", encoding: "mp3" });
     const taken = [dest({ label: "NAS" }), dest({ label: "NAS 2" })];
     expect(newDestination("share", taken, "b").label).toBe("NAS 3");

@@ -482,9 +482,21 @@ export class Editor {
       if (tg) notes.push(mp3 ? "Telegram takes 50 MB per file: long takes drop to 128 kbps, then come in parts." : "Telegram takes 50 MB per file, so WAV arrives in parts. MP3 saves a lot of data.");
       setText(hint, notes.join(" "));
     };
-    const fmt = seg<Encoding>([["wav", "WAV"], ["mp3", "MP3"]], d.encoding, (v) => { d.encoding = v; this.setDirty(); draw(); });
+    const fmt = seg<Encoding>([["wav", "WAV"], ["mp3", "MP3"]], d.encoding, (v) => { d.encoding = v; this.setDirty(); draw(); drawMaster(); });
+    const master = toggle("Auto master", "", d.master, (v) => { d.master = v; this.setDirty(); });
+    master.classList.add("master");
+    // like encode::masters: listening files yes, files meant for mixing no
+    const drawMaster = () => {
+      const stems = !tg && ((p.split_tracks && n > 1) || (d.encoding === "wav" && n > 2));
+      toggleClass(master, "na", stems);
+      setText(master.querySelector("small")!, stems
+        ? "Multitrack files stay untouched, ready for mixing."
+        : "Brings every take up to a healthy level and keeps peaks from clipping. No knobs.");
+    };
+    master.querySelector("div")!.append(h("small"));
     draw();
-    return h("div", { class: "field" }, h("label", { class: "engraved" }, "FORMAT"), h("div", { class: "fmt-row" }, fmt, rates, h("span", { class: "fmt-unit" }, "kbps")), hint);
+    drawMaster();
+    return h("div", { class: "field" }, h("label", { class: "engraved" }, "FORMAT"), h("div", { class: "fmt-row" }, fmt, rates, h("span", { class: "fmt-unit" }, "kbps")), hint, master);
   }
 
   /** Bot token (write-only), chat picker, format. */

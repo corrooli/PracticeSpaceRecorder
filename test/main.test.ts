@@ -126,6 +126,10 @@ describe("status strip", () => {
     push({ dests: ds(["checking"]) });
     expect(mods().filter((m) => (m.title || "").startsWith("NAS")).length).toBe(1);
     expect(mods().find((m) => m.title === "SYSTEM")!.val).toBe("STARTING");
+    // online destinations have no free space: the monitor's words instead
+    push({ dests: [{ id: "t", label: "Band Chat", path: "", state: "ready", message: "Ready · Band Chat", free_bytes: 0 }, { id: "x", label: "X", path: "", state: "ready", message: "", free_bytes: 0 }] });
+    expect(mod("BAND CHAT").val).toBe("Ready · Band Chat");
+    expect(mod("X").val).toBe("Ready");
   });
 
   it("delivery module, click to retry", () => {

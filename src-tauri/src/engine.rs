@@ -1417,6 +1417,7 @@ mod tests {
         let out = dir.join("Takes");
         let mut store = Store::load(&dir.join("config.json"));
         store.presets[0].destinations[0].path = out.to_string_lossy().into();
+        store.presets[0].destinations[0].master = false; // samples are checked bit for bit
         store.presets[0].sample_rate = 1000;
         store.presets[0].preroll_secs = 0.0;
         store.presets[0].filename = "{preset} {take}".into();

@@ -181,13 +181,15 @@ pub fn mix_channels(n: usize) -> u16 {
     n.clamp(1, 2) as u16
 }
 
-/// Mix multitrack frames to stereo: every track centered, equal power, peaks
-/// over full scale bent softly back under it instead of clipping.
-pub fn mix_stereo(frames: &[f32], n: usize, out: &mut Vec<f32>) {
+/// Mix multitrack frames to stereo: every track centered, equal power. With
+/// `clip`, peaks over full scale are bent softly back under it (without, the
+/// master's limiter takes care of them, much more cleanly).
+pub fn mix_stereo(frames: &[f32], n: usize, clip: bool, out: &mut Vec<f32>) {
     let g = 1.0 / (n as f32).sqrt();
     out.clear();
     for fr in frames.chunks_exact(n) {
-        let v = soft_clip(fr.iter().sum::<f32>() * g);
+        let sum = fr.iter().sum::<f32>() * g;
+        let v = if clip { soft_clip(sum) } else { sum };
         out.push(v);
         out.push(v);
     }
@@ -216,14 +218,61 @@ pub enum Layout {
     Mix,
 }
 
-/// Pump a spool range through the sinks. Finishes them on success; on error
-/// the caller throws the half-written files away.
-pub fn render(mut rd: SpoolReader, layout: Layout, mut sinks: Vec<Box<dyn Sink>>, progress: &mut dyn FnMut(f32)) -> Result<(), String> {
+/// Whether the auto master applies: to files people listen to (mono, stereo,
+/// mixes), never to multitrack files meant for mixing in a DAW.
+pub fn masters(layout: Layout, n: usize) -> bool {
+    match layout {
+        Layout::Mix => true,
+        Layout::AsRecorded => n <= 2,
+        Layout::Split => false,
+    }
+}
+
+/// First pass of the auto master: measure the whole range as it will come out
+/// (mixed, if so) and return the gain to use.
+pub fn analyze(mut rd: SpoolReader, layout: Layout, sample_rate: u32, progress: &mut dyn FnMut(f32)) -> Result<f64, String> {
+    let n = rd.channels();
+    let mix = layout == Layout::Mix && n > 2;
+    let mut a = crate::master::Analyzer::new(sample_rate, if mix { 2 } else { n });
+    let mut mixed = Vec::new();
+    let mut blocks = 0u32;
+    while let Some(block) = rd.next_block(16384)? {
+        if mix {
+            mix_stereo(block, n, false, &mut mixed);
+            a.push(&mixed);
+        } else {
+            a.push(block);
+        }
+        blocks += 1;
+        if blocks % 4 == 0 {
+            progress(rd.done());
+        }
+    }
+    let r = a.finish();
+    let g = crate::master::gain_db(&r);
+    log::info!("auto master: {:.1} LUFS, peaks {:.1} dBFS, gain {:+.1} dB", r.lufs, r.peak_db, g);
+    Ok(g)
+}
+
+/// Pump a spool range through the sinks, through the auto master if given
+/// (one-sink layouts only). Finishes the sinks on success; on error the caller
+/// throws the half-written files away.
+pub fn render(mut rd: SpoolReader, layout: Layout, mut sinks: Vec<Box<dyn Sink>>, mut master: Option<crate::master::Master>, progress: &mut dyn FnMut(f32)) -> Result<(), String> {
     let n = rd.channels();
     let mut tracks: Vec<Vec<f32>> = vec![Vec::new(); if layout == Layout::Split { n } else { 0 }];
     let mut mixed = Vec::new();
+    let mut mastered = Vec::new();
     let mut blocks = 0u32;
     let werr = |e: io::Error| format!("Write failed: {e}");
+    let mut out = |sink: &mut Box<dyn Sink>, m: &mut Option<crate::master::Master>, x: &[f32]| -> io::Result<()> {
+        match m {
+            Some(m) => {
+                m.process(x, &mut mastered);
+                sink.write(&mastered)
+            }
+            None => sink.write(x),
+        }
+    };
     while let Some(block) = rd.next_block(16384)? {
         match layout {
             Layout::Split => {
@@ -240,15 +289,20 @@ pub fn render(mut rd: SpoolReader, layout: Layout, mut sinks: Vec<Box<dyn Sink>>
                 }
             }
             Layout::Mix if n > 2 => {
-                mix_stereo(block, n, &mut mixed);
-                sinks[0].write(&mixed).map_err(werr)?;
+                mix_stereo(block, n, master.is_none(), &mut mixed);
+                out(&mut sinks[0], &mut master, &mixed).map_err(werr)?;
             }
-            _ => sinks[0].write(block).map_err(werr)?,
+            _ => out(&mut sinks[0], &mut master, block).map_err(werr)?,
         }
         blocks += 1;
         if blocks % 4 == 0 {
             progress(rd.done());
         }
+    }
+    if let Some(m) = master.as_mut() {
+        let mut tail = Vec::new();
+        m.finish(&mut tail);
+        sinks[0].write(&tail).map_err(werr)?;
     }
     for s in sinks {
         s.finish().map_err(|e| format!("Finalize failed: {e}"))?;
@@ -300,7 +354,7 @@ pub(crate) mod tests {
         let tags = Tags { title: "Take 1".into(), artist: "Band".into(), album: "Band Practice".into(), year: "2026".into(), comment: "x".into() };
         let sink = Mp3Writer::create(&out, 48_000, 2, 192, &tags).unwrap();
         let mut seen = vec![];
-        render(SpoolReader::open(&raw, 2, 0, 48_000 * 3).unwrap(), Layout::AsRecorded, vec![Box::new(sink)], &mut |p| seen.push(p)).unwrap();
+        render(SpoolReader::open(&raw, 2, 0, 48_000 * 3).unwrap(), Layout::AsRecorded, vec![Box::new(sink)], None, &mut |p| seen.push(p)).unwrap();
         let b = std::fs::read(&out).unwrap();
         assert!(b.starts_with(b"ID3"));
         assert!(b.windows(6).any(|w| w == b"Take 1"));
@@ -319,7 +373,7 @@ pub(crate) mod tests {
 
         let mono = d.join("m.mp3");
         let sink = Mp3Writer::create(&mono, 48_000, 1, 128, &Tags::default()).unwrap();
-        render(SpoolReader::open(&raw, 2, 0, 48_000).unwrap(), Layout::Split, vec![Box::new(sink), Box::new(Mp3Writer::create(&d.join("m2.mp3"), 48_000, 1, 128, &Tags::default()).unwrap())], &mut |_| {}).unwrap();
+        render(SpoolReader::open(&raw, 2, 0, 48_000).unwrap(), Layout::Split, vec![Box::new(sink), Box::new(Mp3Writer::create(&d.join("m2.mp3"), 48_000, 1, 128, &Tags::default()).unwrap())], None, &mut |_| {}).unwrap();
         let b = std::fs::read(&mono).unwrap();
         assert!(!b.starts_with(b"ID3"), "no tags, no ID3");
         assert_eq!(first_frame(&b), (128, 48_000, true));
@@ -338,7 +392,7 @@ pub(crate) mod tests {
         for (k, want) in [(64, 128), (128, 128), (160, 160), (192, 192), (224, 224), (256, 256), (320, 320), (999, 320)] {
             let out = d.join(format!("{k}.mp3"));
             let raw = spool(&d, 1, 96_000, sine);
-            render(SpoolReader::open(&raw, 1, 0, 96_000).unwrap(), Layout::AsRecorded, vec![Box::new(Mp3Writer::create(&out, 96_000, 1, k, &Tags::default()).unwrap())], &mut |_| {}).unwrap();
+            render(SpoolReader::open(&raw, 1, 0, 96_000).unwrap(), Layout::AsRecorded, vec![Box::new(Mp3Writer::create(&out, 96_000, 1, k, &Tags::default()).unwrap())], None, &mut |_| {}).unwrap();
             assert_eq!(first_frame(&std::fs::read(&out).unwrap()), (want, 48_000, true), "{k}");
         }
         assert!(Mp3Writer::create(&d.join("nope/x.mp3"), 48_000, 2, 192, &Tags::default()).is_err());
@@ -348,10 +402,10 @@ pub(crate) mod tests {
     #[test]
     fn mixdown_is_centered_equal_power_and_never_clips() {
         let mut out = vec![];
-        mix_stereo(&[0.1, 0.1, 0.1, 0.1], 4, &mut out);
+        mix_stereo(&[0.1, 0.1, 0.1, 0.1], 4, true, &mut out);
         assert_eq!(out.len(), 2);
         assert!((out[0] - 0.2).abs() < 1e-6 && out[0] == out[1]);
-        mix_stereo(&[1.0; 8], 8, &mut out);
+        mix_stereo(&[1.0; 8], 8, true, &mut out);
         assert!(out[0] < 1.0 && out[0] > 0.95, "{}", out[0]);
         assert_eq!(soft_clip(0.5), 0.5);
         assert_eq!(soft_clip(-0.891), -0.891);
@@ -383,12 +437,12 @@ pub(crate) mod tests {
             std::fs::metadata(d.join("empty.wav")).unwrap().len()
         };
         let w = WavWriter::create(&d.join("mix.wav"), 48_000, 2, 16, false).unwrap();
-        render(SpoolReader::open(&raw, 3, 0, 1000).unwrap(), Layout::Mix, vec![Box::new(w)], &mut |_| {}).unwrap();
+        render(SpoolReader::open(&raw, 3, 0, 1000).unwrap(), Layout::Mix, vec![Box::new(w)], None, &mut |_| {}).unwrap();
         assert_eq!(std::fs::metadata(d.join("mix.wav")).unwrap().len(), header + 1000 * 2 * 2);
         // mix of 2 tracks passes through
         let raw2 = spool(&d, 2, 100, sine);
         let w = WavWriter::create(&d.join("st.wav"), 48_000, 2, 16, false).unwrap();
-        render(SpoolReader::open(&raw2, 2, 0, 100).unwrap(), Layout::Mix, vec![Box::new(w)], &mut |_| {}).unwrap();
+        render(SpoolReader::open(&raw2, 2, 0, 100).unwrap(), Layout::Mix, vec![Box::new(w)], None, &mut |_| {}).unwrap();
         assert_eq!(std::fs::metadata(d.join("st.wav")).unwrap().len(), header + 100 * 4);
     }
 
@@ -407,12 +461,12 @@ pub(crate) mod tests {
         let d = TempDir::new("enc");
         let raw = spool(&d, 2, 100, sine);
         let rd = || SpoolReader::open(&raw, 2, 0, 100).unwrap();
-        assert_eq!(render(rd(), Layout::AsRecorded, vec![Box::new(Broken(true))], &mut |_| {}).unwrap_err(), "Write failed: disk full");
-        assert_eq!(render(rd(), Layout::Split, vec![Box::new(Broken(true)), Box::new(Broken(true))], &mut |_| {}).unwrap_err(), "Write failed: disk full");
-        assert_eq!(render(rd(), Layout::AsRecorded, vec![Box::new(Broken(false))], &mut |_| {}).unwrap_err(), "Finalize failed: nope");
+        assert_eq!(render(rd(), Layout::AsRecorded, vec![Box::new(Broken(true))], None, &mut |_| {}).unwrap_err(), "Write failed: disk full");
+        assert_eq!(render(rd(), Layout::Split, vec![Box::new(Broken(true)), Box::new(Broken(true))], None, &mut |_| {}).unwrap_err(), "Write failed: disk full");
+        assert_eq!(render(rd(), Layout::AsRecorded, vec![Box::new(Broken(false))], None, &mut |_| {}).unwrap_err(), "Finalize failed: nope");
         let raw3 = spool(&d, 3, 10, sine);
-        assert!(render(SpoolReader::open(&raw3, 3, 0, 10).unwrap(), Layout::Mix, vec![Box::new(Broken(true))], &mut |_| {}).is_err());
+        assert!(render(SpoolReader::open(&raw3, 3, 0, 10).unwrap(), Layout::Mix, vec![Box::new(Broken(true))], None, &mut |_| {}).is_err());
         let rd = SpoolReader::open(&raw, 2, 0, 200).unwrap();
-        assert!(render(rd, Layout::AsRecorded, vec![Box::new(Broken(false))], &mut |_| {}).unwrap_err().starts_with("Spool read failed"));
+        assert!(render(rd, Layout::AsRecorded, vec![Box::new(Broken(false))], None, &mut |_| {}).unwrap_err().starts_with("Spool read failed"));
     }
 }

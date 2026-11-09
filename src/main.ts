@@ -174,7 +174,7 @@ function render() {
   s.dests.forEach((d, i) => {
     const m = destMods[i];
     const title = d.label.toUpperCase();
-    if (d.state === "ready") setMod(m, "green", title, `Ready · ${fmtBytes(d.free_bytes)} free`);
+    if (d.state === "ready") setMod(m, "green", title, d.free_bytes > 0 ? `Ready · ${fmtBytes(d.free_bytes)} free` : d.message || "Ready");
     else if (d.state === "checking") setMod(m, "amber", title, "Checking…", "", true);
     else if (d.state === "mounting") setMod(m, "amber", title, "Connecting share…", "warn", true);
     else setMod(m, "red", title, d.message, "err");

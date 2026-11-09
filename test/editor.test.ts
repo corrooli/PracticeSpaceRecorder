@@ -683,6 +683,39 @@ describe("format", () => {
   });
 });
 
+describe("auto master", () => {
+  const sw = () => sheet().querySelector<HTMLElement>(".toggle.master")!;
+  const sub = () => sw().querySelector("small")!.textContent;
+  const multi = (o: any = {}) => preset({ mode: "multitrack", channels: [1, 2, 3], ...o });
+  const fmtBtn = (label: string) => [...sheet().querySelectorAll<HTMLElement>(".fmt-row button")].find((b) => b.textContent === label)!;
+
+  it("on by default, one switch, no knobs", () => {
+    ed.open("presets");
+    expect(sw().className).toBe("toggle on master");
+    expect(sub()).toContain("healthy level");
+    sw().click();
+    expect(draft().destinations[0].master).toBe(false);
+    expect(hint()).toContain("Unsaved");
+    sw().click();
+    expect(draft().destinations[0].master).toBe(true);
+  });
+
+  it("multitrack files for mixing stay untouched, their mixes don't", () => {
+    boot(state({ presets: [multi()] }));
+    ed.open("presets");
+    expect(sw().className).toContain("na");
+    expect(sub()).toContain("stay untouched");
+    fmtBtn("MP3").click();
+    expect(sw().className).not.toContain("na");
+    boot(state({ presets: [multi({ split_tracks: true, destinations: [dest({ encoding: "mp3" })] })] }));
+    ed.open("presets");
+    expect(sw().className).toContain("na");
+    boot(state({ presets: [multi({ split_tracks: true, destinations: [dest({ kind: "telegram", encoding: "wav" })] })] }));
+    ed.open("presets");
+    expect(sw().className).not.toContain("na", "Telegram always gets the mix");
+  });
+});
+
 describe("telegram", () => {
   const tg = (o: any = {}) => dest({ id: "t1", kind: "telegram", label: "Band chat", path: "", encoding: "mp3", ...o });
   const withTg = (o: any = {}, st: any = []) => boot(state({ presets: [preset({ destinations: [tg(o)] })], dests: st }));

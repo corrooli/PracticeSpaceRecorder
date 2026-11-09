@@ -49,7 +49,7 @@ export function newDestination(kind: DestKind, existing: Destination[], id: stri
   let label = base;
   for (let n = 2; taken.has(label); n++) label = `${base} ${n}`;
   const info = kindInfo(kind);
-  return { id, kind, label, path: "", smb_url: "", mount_cmd: "", enabled: true, encoding: info.encoding, bitrate: 192, token: "", chat_id: "", chat_name: "" };
+  return { id, kind, label, path: "", smb_url: "", mount_cmd: "", enabled: true, encoding: info.encoding, master: true, bitrate: 192, token: "", chat_id: "", chat_name: "" };
 }
 
 /** Bytes per minute of audio in this format. */

@@ -1,7 +1,7 @@
 import type { AppState, Preset, Destination, JobView } from "../src/types";
 
 export function dest(o: Partial<Destination> = {}): Destination {
-  return { id: "d1", kind: "folder", label: "Local", path: "/music", smb_url: "", mount_cmd: "", enabled: true, encoding: "wav", bitrate: 192, token: "", chat_id: "", chat_name: "", ...o };
+  return { id: "d1", kind: "folder", label: "Local", path: "/music", smb_url: "", mount_cmd: "", enabled: true, encoding: "wav", master: true, bitrate: 192, token: "", chat_id: "", chat_name: "", ...o };
 }
 
 export function preset(o: Partial<Preset> = {}): Preset {

@@ -512,6 +512,8 @@ body.recording .clock-digits { color: var(--amber); text-shadow: 0 0 10px rgba(2
 .ktile.kind-telegram:hover .ktile-icon { color: #bcdcff; }
 
 .dcard-body > .field + .field, .dcard-body > .chat-list + .field, .dcard-body > .lands + .field, .dcard-body > .crumbs + .field { margin-top: 16px; }
+.toggle.master { margin-top: 10px; }
+.toggle.master.na { opacity: 0.5; }
 .adv { margin-top: 8px; }
 .linkish { color: var(--amber-dim); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
 
