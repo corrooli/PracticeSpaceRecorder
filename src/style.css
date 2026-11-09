@@ -467,6 +467,51 @@ body.recording .clock-digits { color: var(--amber); text-shadow: 0 0 10px rgba(2
 .ktile-blurb { font-size: 12px; line-height: 1.5; color: var(--text-mid); }
 @keyframes rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
+/* format: WAV / MP3 + bitrate */
+.fmt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.fmt-row .seg button { min-width: 74px; }
+.fmt-row .rates button { min-width: 0; padding: 0 11px; letter-spacing: 0.08em; font-size: 12px; }
+.fmt-row .rates { animation: rise 0.2s ease-out both; }
+.fmt-row .rates.hidden, .fmt-row .rates.hidden + .fmt-unit { display: none; }
+.fmt-unit { font: 500 9.5px/1 Roboto, sans-serif; letter-spacing: 0.24em; color: var(--engrave-dim); text-transform: uppercase; }
+
+/* telegram: setup steps, chat chip, chat picker */
+.tg-steps { margin: 0 0 14px; padding: 14px 18px 14px 0; list-style: none; counter-reset: step; border-radius: 10px; background: rgba(0, 0, 0, 0.18); box-shadow: inset 0 0 0 1px rgba(255, 176, 72, 0.12); }
+.tg-steps li { position: relative; padding-left: 52px; min-height: 26px; font-size: 12.5px; line-height: 1.5; color: var(--text-mid); counter-increment: step; }
+.tg-steps li + li { margin-top: 8px; }
+.tg-steps li::before {
+  content: counter(step); position: absolute; left: 16px; top: -1px; width: 24px; height: 24px; border-radius: 50%;
+  font: 500 12px/24px Oswald, sans-serif; text-align: center; color: #2a1a06;
+  background: linear-gradient(180deg, #ffc879, #f0a040); box-shadow: 0 0 10px rgba(255, 176, 72, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+.tg-steps b { font-weight: 500; color: var(--amber-hot); }
+.tg-steps code { padding: 1px 5px; border-radius: 4px; font: 11.5px Menlo, monospace; color: var(--amber-hot); background: rgba(255, 176, 72, 0.1); }
+.chat-chip {
+  display: flex; flex: 1; flex-direction: column; justify-content: center; min-height: 38px; padding: 0 14px; border-radius: 7px;
+  background: linear-gradient(180deg, rgba(122, 180, 240, 0.13), rgba(122, 180, 240, 0.03)); box-shadow: inset 0 0 0 1px rgba(122, 180, 240, 0.36), 0 0 16px rgba(122, 180, 240, 0.08);
+}
+.chat-chip b { font: 400 15px/1.15 Oswald, sans-serif; letter-spacing: 0.04em; color: #d6e8ff; text-shadow: 0 0 8px rgba(122, 180, 240, 0.5); }
+.chat-chip small { font: 10px/1.3 Menlo, monospace; color: rgba(160, 196, 236, 0.6); }
+.chat-chip small:empty { display: none; }
+.chat-chip.empty { background: rgba(0, 0, 0, 0.25); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05), inset 0 2px 6px rgba(0, 0, 0, 0.6); }
+.chat-chip.empty span { font: 500 9.5px/1 Roboto, sans-serif; letter-spacing: 0.24em; text-transform: uppercase; color: var(--engrave-dim); }
+.chat-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); grid-gap: 10px; margin-top: 10px; }
+.chat-list:empty { display: none; }
+.chat-msg { grid-column: 1 / -1; font-size: 12px; color: var(--text-mid); }
+.chat-msg.err { color: #ff9a84; }
+.chat {
+  display: flex; flex-direction: column; align-items: flex-start; padding: 12px 14px; border-radius: 9px; text-align: left; cursor: pointer;
+  background: linear-gradient(180deg, #34333b, #24232a); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.1), 0 4px 10px rgba(0, 0, 0, 0.4);
+  animation: rise 0.22s ease-out both; transition: transform 0.12s, box-shadow 0.2s;
+}
+.chat:hover, .chat.on { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(122, 180, 240, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 10px 20px rgba(0, 0, 0, 0.45), 0 0 22px rgba(122, 180, 240, 0.16); }
+.chat b { margin: 6px 0 3px; font: 400 15px/1.2 Oswald, sans-serif; letter-spacing: 0.04em; color: var(--ivory); }
+.chat small { font: 10px Menlo, monospace; color: var(--engrave-dim); }
+.chat-kind { font: 700 8.5px/1 Roboto, sans-serif; letter-spacing: 0.24em; color: rgba(140, 190, 245, 0.85); }
+.dcard.kind-telegram .dkind { color: #a8cdf5; background: rgba(122, 180, 240, 0.07); box-shadow: inset 0 0 0 1px rgba(122, 180, 240, 0.4); }
+.ktile.kind-telegram:hover .ktile-icon { color: #bcdcff; }
+
+.dcard-body > .field + .field, .dcard-body > .chat-list + .field, .dcard-body > .lands + .field, .dcard-body > .crumbs + .field { margin-top: 16px; }
 .adv { margin-top: 8px; }
 .linkish { color: var(--amber-dim); font-size: 11.5px; text-decoration: underline; text-underline-offset: 2px; }
 

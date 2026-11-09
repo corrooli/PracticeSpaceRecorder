@@ -2,7 +2,9 @@ export type Mode = "mono" | "stereo" | "multitrack";
 export type Format = "wav16" | "wav24" | "wav32f";
 
 /** Rust: DestKind. "unsupported" = made by a newer version. */
-export type DestKind = "folder" | "share" | "unsupported";
+export type DestKind = "folder" | "share" | "telegram" | "unsupported";
+
+export type Encoding = "wav" | "mp3";
 
 export interface Destination {
   id: string;
@@ -12,6 +14,13 @@ export interface Destination {
   smb_url: string;
   mount_cmd: string;
   enabled: boolean;
+  encoding: Encoding;
+  /** MP3 kbps. */
+  bitrate: number;
+  /** Write-only: the recorder sends back a mask ("••••abcd"), never the token. */
+  token: string;
+  chat_id: string;
+  chat_name: string;
 }
 
 export interface Preset {
@@ -122,6 +131,20 @@ export interface DestTest {
   msg: string;
   path: string;
   free: number;
+}
+
+export interface Chat {
+  id: string;
+  name: string;
+  /** private, group, supergroup, channel */
+  kind: string;
+}
+
+export interface ChatList {
+  ok: boolean;
+  msg: string;
+  bot: string;
+  chats: Chat[];
 }
 
 export interface LiveMsg {

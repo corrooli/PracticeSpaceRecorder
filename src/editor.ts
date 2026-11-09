@@ -1,13 +1,14 @@
 // Preset editor + setup sheet. Lives on the recording computer only.
 
 import { h, clear, led, setLed, setText, toggleClass, noFocus, fmtBytes } from "./dom";
-import type { AppState, Preset, Destination, DestStatus, Mode, Format, LiveMsg, DestTest } from "./types";
-import { KINDS, kindInfo, newDestination, parseShareUrl } from "./destinations";
+import type { AppState, Preset, Destination, DestStatus, Mode, Format, LiveMsg, DestTest, ChatList, Chat, Encoding } from "./types";
+import { KINDS, BITRATES, kindInfo, newDestination, parseShareUrl, bytesPerMinute } from "./destinations";
 
 export interface EditorApi {
   send(cmd: Record<string, unknown>): void;
   pickFolder(start: string): Promise<string | null>;
   testDest(d: Destination): Promise<DestTest>;
+  findChats(d: Destination): Promise<ChatList>;
   onLive(f: (m: LiveMsg) => void): () => void;
   getMeters(): number[];
   isPrivileged(): boolean;
@@ -361,7 +362,7 @@ export class Editor {
   /** LED + text + card glow for a live destination status. */
   private showStatus(e: { led: HTMLElement; text: HTMLElement; card: HTMLElement; lands: HTMLElement | null }, st: DestStatus) {
     setLed(e.led, st.state === "ready" ? "green" : st.state === "error" ? "red" : "amber", st.state === "checking" || st.state === "mounting");
-    setText(e.text, st.state === "ready" ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message);
+    setText(e.text, st.state === "ready" ? (st.free_bytes > 0 ? `Ready · ${fmtBytes(st.free_bytes)} free` : st.message || "Ready") : st.message);
     e.text.className = "dpill-text" + (st.state === "error" ? " err" : "");
     e.card.dataset.state = st.state;
     if (e.lands) {
@@ -400,11 +401,11 @@ export class Editor {
       entry.hold = Date.now() + 15000;
       test.className = "key test " + (r.ok ? "ok" : "fail");
       setLed(l, r.ok ? "green" : "red");
-      setText(text, r.ok ? `Works · ${fmtBytes(r.free)} free · ${r.path}` : r.msg);
+      setText(text, r.ok ? (r.free > 0 ? `Works · ${fmtBytes(r.free)} free · ${r.path}` : `Works · ${r.path}`) : r.msg);
       text.className = "dpill-text " + (r.ok ? "good" : "err");
       card.dataset.state = r.ok ? "ready" : "error";
     }, "test");
-    test.title = "Write a test file there right now (connects the share if needed)";
+    test.title = d.kind === "telegram" ? "Say hi in the chat right now" : "Write a test file there right now (connects the share if needed)";
     const remove = key("REMOVE", () => { p.destinations.splice(i, 1); this.setDirty(); this.renderForm(); }, "red");
     remove.title = "Remove this destination (REVERT brings it back)";
 
@@ -413,12 +414,12 @@ export class Editor {
         h("div", { class: "dicon", html: info.icon }),
         h("div", { class: "dtitle" }, name, h("div", { class: "dmeta" }, h("span", { class: "dkind" }, info.title), h("span", { class: "dpill" }, l, text))),
         h("div", { class: "dactions" }, power, test, remove)),
-      h("div", { class: "dcard-body" }, this.destBody(d, lands)));
+      h("div", { class: "dcard-body" }, this.destBody(p, d, lands)));
     return card;
   }
 
   /** The fields that make each kind of destination. */
-  private destBody(d: Destination, lands: HTMLElement | null): (HTMLElement | null)[] {
+  private destBody(p: Preset, d: Destination, lands: HTMLElement | null): (HTMLElement | null)[] {
     const s = this.state!;
     const mac = s.platform === "macos";
     const cmdIn = input(d.mount_cmd, (v) => { d.mount_cmd = v; this.setDirty(); }, { class: "input mono", placeholder: "mount /mnt/nas" });
@@ -436,7 +437,7 @@ export class Editor {
       });
       // folders from older versions may still auto-connect a share first
       const legacy = d.smb_url ? field("CONNECT THIS SHARE FIRST", input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); }, { class: "input mono" })) : null;
-      return [field("FOLDER", h("div", { class: "dest-path" }, pathIn, browse), "A missing last folder is created for you."), ...advanced(legacy, !!(d.mount_cmd || d.smb_url))];
+      return [field("FOLDER", h("div", { class: "dest-path" }, pathIn, browse), "A missing last folder is created for you."), this.formatRow(p, d), ...advanced(legacy, !!(d.mount_cmd || d.smb_url))];
     }
     if (d.kind === "share") {
       const crumbs = h("div", { class: "crumbs" });
@@ -456,9 +457,90 @@ export class Editor {
       const urlIn = input(d.smb_url, (v) => { d.smb_url = v; this.setDirty(); draw(); }, { class: "input mono", placeholder: "smb://you@nas.local/Music/Band" });
       draw();
       return [field("SHARE ADDRESS", urlIn, mac ? "Logs in with your Keychain. Takes land in the folder at the end of the address." : "Logs in with your keyring (gio). Takes land in the folder at the end of the address."),
-        crumbs, lands, ...advanced(null, !!d.mount_cmd)];
+        crumbs, lands, this.formatRow(p, d), ...advanced(null, !!d.mount_cmd)];
     }
+    if (d.kind === "telegram") return this.telegramBody(p, d);
     return [h("div", { class: "hint" }, "Made by a newer version of PracticeSpaceRecorder. Kept as it is, but this version can't deliver to it.")];
+  }
+
+  /** WAV or MP3 at a bitrate, with an idea of what that costs. */
+  private formatRow(p: Preset, d: Destination): HTMLElement {
+    const n = p.mode === "mono" ? 1 : p.mode === "stereo" ? 2 : p.channels.length;
+    const bits = p.format === "wav16" ? 16 : p.format === "wav24" ? 24 : 32;
+    const tg = d.kind === "telegram";
+    const hint = h("div", { class: "hint" });
+    const rates = seg(BITRATES.map((b): [string, string] => [String(b), String(b)]), String(d.bitrate), (v) => { d.bitrate = Number(v); this.setDirty(); draw(); });
+    rates.classList.add("rates");
+    const draw = () => {
+      const mp3 = d.encoding === "mp3";
+      toggleClass(rates, "hidden", !mp3);
+      const ch = mp3 || tg ? Math.min(n, 2) : n;
+      const per10 = bytesPerMinute(d.encoding, d.bitrate, p.sample_rate, ch, bits) * 10 * (p.split_tracks && !tg && n > 1 ? (mp3 ? n / ch : 1) : 1);
+      const notes = [mp3 ? `About ${fmtBytes(per10)} per 10 minutes.` : `As recorded, about ${fmtBytes(per10)} per 10 minutes.`];
+      if (mp3 && n > 2 && (tg || !p.split_tracks)) notes.push("More than two tracks become a stereo mix.");
+      else if (tg && n > 2) notes.push("Goes out as a stereo mix.");
+      if (tg) notes.push(mp3 ? "Telegram takes 50 MB per file: long takes drop to 128 kbps, then come in parts." : "Telegram takes 50 MB per file, so WAV arrives in parts. MP3 saves a lot of data.");
+      setText(hint, notes.join(" "));
+    };
+    const fmt = seg<Encoding>([["wav", "WAV"], ["mp3", "MP3"]], d.encoding, (v) => { d.encoding = v; this.setDirty(); draw(); });
+    draw();
+    return h("div", { class: "field" }, h("label", { class: "engraved" }, "FORMAT"), h("div", { class: "fmt-row" }, fmt, rates, h("span", { class: "fmt-unit" }, "kbps")), hint);
+  }
+
+  /** Bot token (write-only), chat picker, format. */
+  private telegramBody(p: Preset, d: Destination): (HTMLElement | null)[] {
+    const mask = (t: string) => (t.startsWith("\u2022") || !t ? t : "\u2022\u2022\u2022\u2022" + t.slice(-4));
+    const kept = d.token;
+    const tokenIn = input("", (v) => { d.token = v.trim() || kept; this.setDirty(); }, { class: "input mono", type: "password", placeholder: mask(d.token) || "123456789:AAH4x…" });
+    const steps = !d.token || !d.chat_id
+      ? h("ol", { class: "tg-steps" },
+        h("li", null, "In Telegram, message ", h("b", null, "@BotFather"), ", send ", h("code", null, "/newbot"), " and copy the token it gives you."),
+        h("li", null, "Add your new bot to the band group and say anything in there."),
+        h("li", null, "Paste the token below, hit ", h("b", null, "FIND CHATS"), ", pick the group, then ", h("b", null, "TEST"), "."))
+      : null;
+    const chip = h("div", { class: "chat-chip" });
+    const drawChip = () => {
+      clear(chip);
+      toggleClass(chip, "empty", !d.chat_id);
+      if (!d.chat_id) chip.append(h("span", null, "No chat picked yet"));
+      else chip.append(h("b", null, d.chat_name || d.chat_id), h("small", null, d.chat_name ? d.chat_id : ""));
+    };
+    drawChip();
+    const list = h("div", { class: "chat-list" });
+    const pickChat = (c: Chat) => {
+      d.chat_id = c.id;
+      d.chat_name = c.name;
+      if (!d.label.trim() || d.label === kindInfo("telegram").label) d.label = c.name;
+      this.setDirty();
+      this.renderForm();
+    };
+    const KIND: Record<string, string> = { group: "GROUP", supergroup: "GROUP", channel: "CHANNEL", private: "DIRECT" };
+    const find: HTMLButtonElement = key("FIND CHATS", async () => {
+      if (find.classList.contains("testing")) return;
+      find.className = "key test testing";
+      clear(list);
+      list.append(h("div", { class: "chat-msg" }, "Asking Telegram…"));
+      const r = await this.api.findChats(clone(d));
+      find.className = "key";
+      clear(list);
+      if (!r.ok) { list.append(h("div", { class: "chat-msg err" }, r.msg)); return; }
+      if (!r.chats.length) { list.append(h("div", { class: "chat-msg" }, `${r.bot} hasn't seen any chats yet. Add it to your band group, say hi in there, then FIND CHATS again.`)); return; }
+      list.append(h("div", { class: "chat-msg" }, `Chats ${r.bot} is in. Pick where takes go:`));
+      for (const c of r.chats) {
+        const b = noFocus(h("button", { class: "chat" + (c.id === d.chat_id ? " on" : "") },
+          h("span", { class: "chat-kind" }, KIND[c.kind] || c.kind.toUpperCase()), h("b", null, c.name), h("small", null, c.id)));
+        b.addEventListener("click", () => pickChat(c));
+        list.append(b);
+      }
+    });
+    const idIn = input(d.chat_id, (v) => { d.chat_id = v.trim(); d.chat_name = ""; this.setDirty(); drawChip(); }, { class: "input mono", placeholder: "-1001234567890 or @channel" });
+    const adv = h("div", { class: "adv", style: "display:none" }, field("CHAT ID", idIn, "For channels: add the bot as an admin, then type @channelname here."));
+    const link = noFocus(h("button", { class: "linkish" }, "Advanced…"));
+    link.addEventListener("click", () => { adv.style.display = ""; link.style.display = "none"; });
+    return [steps,
+      field("BOT TOKEN", tokenIn, "Kept on this computer only. Once saved it can't be shown or copied again, only replaced."),
+      field("CHAT", h("div", { class: "dest-path" }, chip, find)), list,
+      this.formatRow(p, d), link, adv];
   }
 
   private meters() {

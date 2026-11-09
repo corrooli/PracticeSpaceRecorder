@@ -1,6 +1,6 @@
 [package]
 name = "practice-space-recorder"
-version = "1.1.0"
+version = "1.2.0"
 description = "Press space. Play loud. Press space. Your take is already on the NAS."
 authors = ["corrooli"]
 license = "AGPL-3.0-or-later"
@@ -36,6 +36,8 @@ anyhow = "1"
 futures-util = "0.3"
 gethostname = "0.5"
 tauri-plugin-dialog = "2"
+mp3lame-encoder = "0.2"
+ureq = "2"
 
 [profile.release]
 opt-level = 3

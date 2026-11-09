@@ -397,6 +397,28 @@ describe("editor wiring", () => {
     expect((document.querySelector("#sheet .ch .mtr i") as HTMLElement).style.width).toBe("100%");
   });
 
+  it("chat lookup round-trips, and times out without an answer", async () => {
+    push({ presets: [preset({ destinations: [dest({ kind: "telegram", token: "••••abcd" })] })] });
+    if ($("sheet").classList.contains("hidden")) $("presetsKey").click();
+    const revert = () => [...document.querySelectorAll<HTMLElement>("#sheet .key")].find((b) => b.textContent === "REVERT")!.click();
+    revert();
+    ws.sent = [];
+    const find = [...document.querySelectorAll<HTMLElement>("#sheet .key")].find((b) => b.textContent === "FIND CHATS")!;
+    find.click();
+    const req = ws.sent.find((c) => c.cmd === "find_chats");
+    expect(req.dest.token).toBe("••••abcd");
+    ws.msg({ t: "chats", req: "stray", ok: true, msg: "", bot: "", chats: [] });
+    ws.msg({ t: "chats", req: req.req, ok: true, msg: "", bot: "@b", chats: [{ id: "-1", name: "Band", kind: "group" }] });
+    await vi.waitFor(() => expect(document.querySelector("#sheet .chat b")!.textContent).toBe("Band"));
+    vi.useFakeTimers();
+    find.click();
+    vi.advanceTimersByTime(30001);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(document.querySelector("#sheet .chat-msg")!.textContent).toBe("No answer from the recorder"));
+    push();
+    revert();
+  });
+
   it("destination test round-trips, and times out without an answer", async () => {
     push();
     $("presetsKey").click();

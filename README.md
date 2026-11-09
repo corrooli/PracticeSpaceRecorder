@@ -42,7 +42,7 @@ Built for the practice space of [Naked Soldier](http://www.nakedsoldier.ch/). Sh
 
 ## Pick your setup
 
-PracticeSpaceRecorder writes every take to one or more **destinations**. A destination is just a folder: on the computer, on a USB stick, on an external drive, on a NAS. Use one, use all of them, the app doesn't judge.
+PracticeSpaceRecorder writes every take to one or more **destinations**: a folder on the computer, a USB stick, an external drive, a NAS, or straight into your band's Telegram chat. Use one, use all of them, the app doesn't judge.
 
 ### The USB stick (what most bands want)
 
@@ -58,7 +58,9 @@ If your practice space has a NAS or any network share, takes can go straight the
 
 <img src="docs/usecase-nas.svg" alt="Recording computer sends takes over the network to a NAS, an optional bot posts them to the band chat" width="100%" />
 
-Our band takes it one step further: a little bot on our NAS posts every new take into the band's group chat, so the recordings are on everyone's phone before the van is loaded. That part is not built into the app, it's a script we wrote because we are those people. PracticeSpaceRecorder just puts the files on the NAS. What happens after that is between you and your NAS.
+### The band chat (for bands that live on their phones)
+
+Add a **Telegram** destination and a bot posts every take into your group chat, ready to play, before the van is loaded. Pair it with a USB stick or the NAS: the chat gets a handy MP3, the drive keeps the full quality WAV. See [Sending takes to Telegram](#sending-takes-to-telegram).
 
 <br/>
 
@@ -72,6 +74,8 @@ Our band takes it one step further: a little bot on our NAS posts every new take
 | **Waveforms you can read from the drum riser** | Every track gets a full width lane with peak and RMS, clip markers and a dB-scaled view, so "is the bass too hot?" takes half a second to answer. |
 | **Saves in the background** | When you stop, the take is written to every destination (local disk, USB stick, external drive, NAS, all of them at once) while you're already recording the next one. |
 | **Lose nothing, ever** | Audio goes to a local buffer first. USB stick unplugged? NAS asleep? The take waits and delivers itself when the destination is back, even after a restart. Power cut mid-take? The audio up to that point is recovered on next launch. |
+| **Straight to the band chat** | A Telegram bot posts every take into your group, as MP3 so it doesn't eat everyone's data plan. |
+| **WAV or MP3, per destination** | Full quality WAV on the drive, small MP3s for the chat, or whatever mix you like. More than two tracks become a stereo mix for MP3. |
 | **Auto-connects your NAS** | Give it an `smb://` address and it mounts the share by itself (using your Keychain login on the Mac). |
 | **Remote control** | Any phone, tablet or laptop on your Wi-Fi can be the record button. Scan a QR code and you're done. No app needed. |
 | **Stays out of the way** | Opens in fullscreen, keeps the computer from sleeping while recording, and asks nothing. |
@@ -190,6 +194,19 @@ That's server, share, then the folder inside it. The app splits it up for you ri
 Connecting happens by itself whenever the share is missing. On a Mac it uses Finder's mount and your Keychain password (you log in once, then never again). On Linux it uses `gio mount`, or you can set your own **mount command** under **Advanced…** (for example `mount /mnt/nas` with an fstab entry).
 
 And if the NAS is off, asleep, or someone tripped over the network cable: **keep recording**. Takes wait in the local buffer, the status LED turns red, and everything is delivered the moment the share is back.
+
+<br/>
+
+## Sending takes to Telegram
+
+1. In Telegram, message **@BotFather**, send `/newbot`, pick a name. It gives you a **token** (looks like `123456789:AAH4x...`).
+2. Add your new bot to the band group and say anything in there, so the bot knows the group exists.
+3. In **PRESETS → DESTINATIONS**, click **+ ADD DESTINATION**, pick **TELEGRAM** and paste the token.
+4. Hit **FIND CHATS**, click your group, then **TEST**. The bot says hi in the chat. Hit **SAVE**.
+
+Takes arrive as playable audio with the preset, take name, length and date. Telegram lets bots upload 50 MB per file, so long takes first drop to 128 kbps and, if they're still too big, arrive in parts ("Take 03 (1 of 2)"). If the internet is down, takes wait and go out later, like everywhere else. A take that was halfway out continues where it stopped instead of posting the first part twice.
+
+The token is kept on the recording computer only. Once saved, the app shows it as `••••abcd` and never hands it out again, not even to the remote. If it ever leaks anyway, send `/revoke` to @BotFather and paste the new one.
 
 <br/>
 

@@ -2,12 +2,12 @@
 //! is an independent task (render spool -> `.part` -> rename). Tasks retry with
 //! backoff forever, survive restarts (jobs.json) and never block recording.
 
-use crate::config::{sanitize, write_atomic, DestKind, Destination, Format};
+use crate::config::{sanitize, write_atomic, DestKind, Destination, Encoding, Format};
+use crate::encode::{render, spool_frames, Layout, Mp3Writer, Sink, SpoolReader, Tags};
 use crate::wav::WavWriter;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,6 +45,17 @@ pub struct DestTask {
     pub attempts: u32,
     pub next_try: i64,
     pub out_path: String,
+    /// Parts already posted (uploads in parts): a retry carries on from here.
+    #[serde(default)]
+    pub sent: u32,
+}
+
+/// What a delivery reports while it runs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Progress {
+    Fraction(f32),
+    /// This many parts are out for good: don't send them again.
+    Sent(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,9 +212,23 @@ impl Jobs {
         };
         let Some((id, ti, job)) = pick else { return false };
         (self.notify)();
-        let result = deliver(&job, &job.tasks[ti].dest, &mut |p| {
-            if let Some(j) = self.list.lock().iter_mut().find(|j| j.id == id) {
-                j.tasks[ti].progress = p;
+        let result = deliver(&job, &job.tasks[ti].dest, job.tasks[ti].sent, &mut |p| {
+            let sent = {
+                let mut list = self.list.lock();
+                let Some(t) = list.iter_mut().find(|j| j.id == id).map(|j| &mut j.tasks[ti]) else { return };
+                match p {
+                    Progress::Fraction(f) => {
+                        t.progress = f;
+                        false
+                    }
+                    Progress::Sent(n) => {
+                        t.sent = n;
+                        true
+                    }
+                }
+            };
+            if sent {
+                self.persist();
             }
             (self.notify)();
         });
@@ -231,8 +256,7 @@ impl Jobs {
             j.done().then(|| j.raw.clone())
         };
         if let Some(raw) = finished {
-            let _ = fs::remove_file(&raw);
-            let _ = fs::remove_file(raw.with_extension("json"));
+            remove_spool(&raw);
         }
         self.persist();
         (self.notify)();
@@ -255,6 +279,7 @@ impl Job {
                 attempts: 0,
                 next_try: 0,
                 out_path: String::new(),
+                sent: 0,
             })
             .collect();
         Job { id: crate::config::new_id("j"), raw, meta, frames, created: now_ms(), tasks, recovered: false, note: String::new() }
@@ -271,104 +296,95 @@ fn unique(base: &Path, ext: &str) -> PathBuf {
     (1..10_000).map(mk).find(|p| !p.exists()).unwrap_or_else(|| mk(1))
 }
 
+/// The spool file, its metadata and any upload leftovers (`<stem>.<dest>.<part>.mp3`).
+fn remove_spool(raw: &Path) {
+    let _ = fs::remove_file(raw);
+    let _ = fs::remove_file(raw.with_extension("json"));
+    let stem = format!("{}.", raw.file_stem().unwrap_or_default().to_string_lossy());
+    if let Some(rd) = raw.parent().and_then(|d| fs::read_dir(d).ok()) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with(&stem) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
 /// Deliver one take to one destination. Returns what to show as "where it went".
-pub fn deliver(job: &Job, dest: &Destination, progress: &mut dyn FnMut(f32)) -> Result<String, String> {
+/// `sent`: parts a previous attempt already got out (uploads only).
+pub fn deliver(job: &Job, dest: &Destination, sent: u32, progress: &mut dyn FnMut(Progress)) -> Result<String, String> {
     match dest.kind {
-        DestKind::Folder | DestKind::Share => deliver_files(job, dest, progress),
-        // new kinds get their own deliver_* here (upload instead of file copy)
+        DestKind::Folder | DestKind::Share => deliver_files(job, dest, &mut |f| progress(Progress::Fraction(f))),
+        DestKind::Telegram => crate::telegram::deliver(job, dest, sent, progress),
         DestKind::Unsupported => Err(crate::dest::UNSUPPORTED.into()),
     }
 }
 
-/// Render the spool into WAV file(s) in a folder (local, or a mounted share).
+/// Render the spool into file(s) in a folder (local, or a mounted share).
 fn deliver_files(job: &Job, dest: &Destination, progress: &mut dyn FnMut(f32)) -> Result<String, String> {
     let root = crate::dest::reach(dest)?;
     let m = &job.meta;
     let n = m.track_names.len().max(1);
-    let raw_len = fs::metadata(&job.raw).map_err(|e| format!("Spool file missing: {e}"))?.len();
-    let frames = raw_len / (4 * n as u64);
+    let frames = spool_frames(&job.raw, n)?;
     let base = root.join(&m.rel_path);
     if let Some(parent) = base.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create folder: {e}"))?;
     }
+    let mp3 = dest.encoding == Encoding::Mp3;
+    let ext = if mp3 { "mp3" } else { "wav" };
     let split = m.split_tracks && n > 1;
-    // (final path, temp path) for each output file
-    let outputs: Vec<(PathBuf, PathBuf)> = if split {
+    // (final path, temp path, title) for each output file
+    let outputs: Vec<(PathBuf, PathBuf, String)> = if split {
         let dir = unique(&base, "");
         fs::create_dir_all(&dir).map_err(|e| format!("Cannot create folder: {e}"))?;
         m.track_names
             .iter()
             .enumerate()
             .map(|(i, t)| {
-                let f = dir.join(format!("{:02} {}.wav", i + 1, sanitize(t)));
-                let tmp = f.with_extension("wav.part");
-                (f, tmp)
+                let f = dir.join(format!("{:02} {}.{ext}", i + 1, sanitize(t)));
+                let tmp = f.with_extension(format!("{ext}.part"));
+                (f, tmp, format!("{} ({t})", m.take_name))
             })
             .collect()
     } else {
-        let f = unique(&base, "wav");
-        let tmp = f.with_extension("wav.part");
-        vec![(f, tmp)]
+        let f = unique(&base, ext);
+        let tmp = f.with_extension(format!("{ext}.part"));
+        vec![(f, tmp, m.take_name.clone())]
     };
-    let (bits, float) = (m.format.bits(), m.format.is_float());
-    let mut writers = Vec::new();
-    for (_, tmp) in &outputs {
-        let ch = if split { 1 } else { n as u16 };
-        writers.push(WavWriter::create(tmp, m.sample_rate, ch, bits, float).map_err(|e| format!("Cannot write: {e}"))?);
-    }
-    let cleanup = |outputs: &[(PathBuf, PathBuf)]| {
-        for (_, t) in outputs {
+    let cleanup = |outputs: &[(PathBuf, PathBuf, String)]| {
+        for (_, t, _) in outputs {
             let _ = fs::remove_file(t);
         }
     };
-    let mut rd = BufReader::with_capacity(1 << 20, File::open(&job.raw).map_err(|e| e.to_string())?);
-    let block = 16384usize;
-    let mut bytes = vec![0u8; block * n * 4];
-    let mut samples = vec![0f32; block * n];
-    let mut per_track: Vec<Vec<f32>> = vec![Vec::with_capacity(block); if split { n } else { 0 }];
-    let mut done = 0u64;
-    let mut last_report = 0u64;
-    while done < frames {
-        let want = ((frames - done) as usize).min(block);
-        let buf = &mut bytes[..want * n * 4];
-        if let Err(e) = rd.read_exact(buf) {
-            cleanup(&outputs);
-            return Err(format!("Spool read failed: {e}"));
-        }
-        for (s, b) in samples.iter_mut().zip(buf.chunks_exact(4)) {
-            *s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-        }
-        let s = &samples[..want * n];
-        let r = if split {
-            for t in per_track.iter_mut() {
-                t.clear();
-            }
-            for fr in s.chunks_exact(n) {
-                for (i, &v) in fr.iter().enumerate() {
-                    per_track[i].push(v);
-                }
-            }
-            writers.iter_mut().zip(&per_track).try_for_each(|(w, t)| w.write(t))
+    // MP3 holds two channels at most: more tracks, unsplit, become a stereo mix
+    let (layout, ch) = match (split, mp3) {
+        (true, _) => (Layout::Split, 1),
+        (false, true) => (Layout::Mix, crate::encode::mix_channels(n)),
+        (false, false) => (Layout::AsRecorded, n as u16),
+    };
+    let year = chrono::DateTime::from_timestamp_millis(m.started_at).unwrap_or_default().with_timezone(&chrono::Local).format("%Y").to_string();
+    let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+    for (_, tmp, title) in &outputs {
+        let s: std::io::Result<Box<dyn Sink>> = if mp3 {
+            let tags = Tags { title: title.clone(), artist: m.preset_name.clone(), album: m.preset_name.clone(), year: year.clone(), comment: "PracticeSpaceRecorder".into() };
+            Mp3Writer::create(tmp, m.sample_rate, ch, dest.bitrate, &tags).map(|w| Box::new(w) as Box<dyn Sink>)
         } else {
-            writers[0].write(s)
+            WavWriter::create(tmp, m.sample_rate, ch, m.format.bits(), m.format.is_float()).map(|w| Box::new(w) as Box<dyn Sink>)
         };
-        if let Err(e) = r {
-            cleanup(&outputs);
-            return Err(format!("Write failed: {e}"));
-        }
-        done += want as u64;
-        if done - last_report > m.sample_rate as u64 * 5 {
-            last_report = done;
-            progress(done as f32 / frames.max(1) as f32 * 0.98);
+        match s {
+            Ok(s) => sinks.push(s),
+            Err(e) => {
+                cleanup(&outputs);
+                return Err(format!("Cannot write: {e}"));
+            }
         }
     }
-    for w in writers {
-        if let Err(e) = w.finalize() {
-            cleanup(&outputs);
-            return Err(format!("Finalize failed: {e}"));
-        }
+    let rd = SpoolReader::open(&job.raw, n, 0, frames)?;
+    if let Err(e) = render(rd, layout, sinks, &mut |f| progress(f * 0.98)) {
+        cleanup(&outputs);
+        return Err(e);
     }
-    for (f, tmp) in &outputs {
+    for (f, tmp, _) in &outputs {
         fs::rename(tmp, f).map_err(|e| format!("Rename failed: {e}"))?;
     }
     let shown = if split { outputs[0].0.parent().unwrap().to_path_buf() } else { outputs[0].0.clone() };
@@ -420,6 +436,123 @@ mod tests {
         }))
     }
 
+    fn mp3(d: &Path) -> Destination {
+        Destination { encoding: Encoding::Mp3, bitrate: 160, ..dest(d.to_string_lossy()) }
+    }
+
+    #[test]
+    fn delivers_mp3_stereo_split_and_mixed() {
+        use crate::encode::tests::first_frame;
+        let d = TempDir::new("jobs");
+        let r = d.join("t.raw");
+        raw(&r, 48_000, 2);
+        let ds = mp3(&d.join("out"));
+        let out = deliver(&Job::new(r.clone(), meta(&["L", "R"], vec![ds.clone()]), 48_000), &ds, 0, &mut |_| {}).unwrap();
+        assert!(out.ends_with("day/take.mp3"), "{out}");
+        let b = fs::read(&out).unwrap();
+        assert!(b.starts_with(b"ID3") && b.windows(4).any(|w| w == b"take"));
+        assert_eq!(first_frame(&b), (160, 48_000, false));
+        // split: one mono MP3 per track
+        let mut m = meta(&["Kick", "Snare"], vec![ds.clone()]);
+        m.split_tracks = true;
+        let out = deliver(&Job::new(r.clone(), m, 48_000), &ds, 0, &mut |_| {}).unwrap();
+        let kick = fs::read(Path::new(&out).join("01 Kick.mp3")).unwrap();
+        assert_eq!(first_frame(&kick), (160, 48_000, true));
+        assert!(kick.windows(11).any(|w| w == b"take (Kick)"));
+        assert!(Path::new(&out).join("02 Snare.mp3").exists());
+        // 3 tracks, not split: a stereo mix (MP3 can't hold more)
+        let r3 = d.join("t3.raw");
+        raw(&r3, 48_000, 3);
+        let out = deliver(&Job::new(r3, meta(&["A", "B", "C"], vec![ds.clone()]), 48_000), &ds, 0, &mut |_| {}).unwrap();
+        assert_eq!(first_frame(&fs::read(&out).unwrap()), (160, 48_000, false));
+        assert!(!fs::read_dir(d.join("out/day")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().ends_with(".part")));
+        // encoder can't start (no sample rate): no leftovers
+        let mut m = meta(&["L", "R"], vec![ds.clone()]);
+        m.sample_rate = 0;
+        assert!(deliver(&Job::new(r, m, 48_000), &ds, 0, &mut |_| {}).unwrap_err().starts_with("Cannot write"));
+    }
+
+    fn tg_dest(enc: Encoding) -> Destination {
+        Destination { id: "tg".into(), kind: DestKind::Telegram, label: "Band".into(), token: "123:abc".into(), chat_id: "-100".into(), chat_name: "Band Chat".into(), encoding: enc, bitrate: 128, ..Default::default() }
+    }
+
+    #[test]
+    fn telegram_in_parts_resumes_where_it_stopped() {
+        use crate::telegram::mock::{fail, ok, Mock};
+        use std::sync::atomic::AtomicUsize;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let m = Mock::start(move |_| if c2.fetch_add(1, Ordering::SeqCst) == 1 { fail(500, "boom") } else { ok("{}") });
+        crate::telegram::TEST_LIMIT.with(|l| l.set(20_000));
+        let d = TempDir::new("jobs");
+        let (_, notify) = counter();
+        let jobs = Jobs::load(d.path().to_path_buf(), notify);
+        let r = jobs.spool_dir().join("tk.raw");
+        raw(&r, 144_000, 1); // 3 s: ~53 KB at 128k, so 3 parts
+        let mut mt = meta(&["Mic"], vec![tg_dest(Encoding::Mp3)]);
+        mt.take_name = "Take 7".into();
+        mt.preset_name = "Band Practice".into();
+        jobs.push(Job::new(r.clone(), mt, 144_000));
+        fs::write(jobs.spool_dir().join("tk.json"), "{}").unwrap();
+        assert!(jobs.run_once());
+        {
+            let l = jobs.list.lock();
+            let t = &l[0].tasks[0];
+            assert_eq!(t.state, TaskState::Failed);
+            assert_eq!(t.message, "Telegram: boom");
+            assert_eq!(t.sent, 1, "part 1 is out");
+        }
+        assert!(fs::read_to_string(d.join("jobs.json")).unwrap().contains("\"sent\": 1"), "survives a restart");
+        jobs.retry_all();
+        assert!(jobs.run_once());
+        let l = jobs.list.lock().clone();
+        assert!(l[0].done());
+        assert_eq!(l[0].tasks[0].out_path, "Telegram \u{b7} Band Chat \u{b7} MP3 128k, 3 parts");
+        let reqs = m.reqs.lock().unwrap().clone();
+        assert_eq!(reqs.len(), 4, "part 1 once, part 2 twice (failed + retry), part 3 once");
+        let body = |i: usize| String::from_utf8_lossy(&reqs[i].body).into_owned();
+        assert!(reqs.iter().all(|q| q.path == "/bot123:abc/sendAudio"));
+        assert!(body(0).contains("Take 7 (1 of 3)") && body(2).contains("Take 7 (2 of 3)") && body(3).contains("Take 7 (3 of 3)"));
+        assert!(body(0).contains("name=\"performer\"\r\n\r\nBand Practice"));
+        assert!(body(0).contains("Band Practice \u{b7} Take 7 (1 of 3) \u{b7} 0:01 \u{b7} "));
+        assert!(body(0).contains("filename=\"Take 7 (1 of 3).mp3\""));
+        assert!(body(0).contains("ID3"));
+        // spool, its metadata and upload leftovers are gone
+        assert_eq!(fs::read_dir(jobs.spool_dir()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn telegram_wav_goes_as_a_document() {
+        use crate::telegram::mock::{ok, Mock};
+        let m = Mock::start(|_| ok("{}"));
+        let d = TempDir::new("jobs");
+        let r = d.join("w.raw");
+        raw(&r, 4800, 2);
+        let ds = Destination { chat_name: "".into(), ..tg_dest(Encoding::Wav) };
+        let mut seen = vec![];
+        let out = deliver(&Job::new(r.clone(), meta(&["L", "R"], vec![ds.clone()]), 4800), &ds, 0, &mut |p| seen.push(p)).unwrap();
+        assert_eq!(out, "Telegram \u{b7} -100 \u{b7} WAV");
+        assert_eq!(m.paths(), vec!["/bot123:abc/sendDocument"]);
+        assert!(String::from_utf8_lossy(&m.reqs.lock().unwrap()[0].body).contains("filename=\"take.wav\""));
+        assert_eq!(seen.last(), Some(&Progress::Sent(1)));
+        // already sent: nothing to do
+        let out = deliver(&Job::new(r.clone(), meta(&["L", "R"], vec![ds.clone()]), 4800), &ds, 1, &mut |_| {}).unwrap();
+        assert!(out.contains("WAV"));
+        assert_eq!(m.paths().len(), 1);
+        // render failures don't upload
+        let mut bad = meta(&["L", "R"], vec![ds.clone()]);
+        bad.sample_rate = 0;
+        assert!(deliver(&Job::new(r.clone(), bad, 4800), &Destination { encoding: Encoding::Mp3, ..ds.clone() }, 0, &mut |_| {}).unwrap_err().starts_with("Cannot write"));
+        let mut blocked = Job::new(r.clone(), meta(&["L", "R"], vec![ds.clone()]), 4800);
+        blocked.raw = d.join("nodir/w.raw");
+        assert!(deliver(&blocked, &ds, 0, &mut |_| {}).unwrap_err().starts_with("Spool file missing"));
+        fs::create_dir_all(d.join("ro")).unwrap();
+        fs::copy(&r, d.join("ro/w.raw")).unwrap();
+        fs::create_dir_all(d.join("ro/w.tg.0.wav")).unwrap(); // a directory where the part goes
+        blocked.raw = d.join("ro/w.raw");
+        assert!(deliver(&blocked, &ds, 0, &mut |_| {}).unwrap_err().starts_with("Cannot write"));
+    }
+
     #[test]
     fn new_job_skips_disabled_and_blank_destinations() {
         let mut off = dest("/x");
@@ -462,7 +595,7 @@ mod tests {
         let mut m = meta(&["Kick", "Snare", "Gtr/L"], vec![ds.clone()]);
         m.split_tracks = true;
         let job = Job::new(r.clone(), m.clone(), frames);
-        let out = deliver(&job, &ds, &mut |_| {}).unwrap();
+        let out = deliver(&job, &ds, 0, &mut |_| {}).unwrap();
         let dir = PathBuf::from(&out);
         assert!(dir.ends_with("day/take"));
         assert!(dir.join("01 Kick.wav").exists());
@@ -473,14 +606,14 @@ mod tests {
         let s500 = i32::from_le_bytes([0, snare[104 + 1500], snare[105 + 1500], snare[106 + 1500]]) >> 8;
         assert_eq!(s500, -4_194_304);
         // second split delivery gets its own folder
-        let out2 = deliver(&job, &ds, &mut |_| {}).unwrap();
+        let out2 = deliver(&job, &ds, 0, &mut |_| {}).unwrap();
         assert!(out2.ends_with("take (2)"));
         m.split_tracks = false;
         let job = Job::new(r, m, frames);
-        let out = deliver(&job, &ds, &mut |_| {}).unwrap();
+        let out = deliver(&job, &ds, 0, &mut |_| {}).unwrap();
         assert!(out.ends_with("take.wav"));
         assert_eq!(fs::metadata(&out).unwrap().len(), 104 + frames * 9);
-        let out2 = deliver(&job, &ds, &mut |_| {}).unwrap();
+        let out2 = deliver(&job, &ds, 0, &mut |_| {}).unwrap();
         assert!(out2.ends_with("take (2).wav"));
         // no .part files left anywhere
         let parts = fs::read_dir(d.join("out/day")).unwrap().flatten().filter(|e| e.path().to_string_lossy().ends_with(".part")).count();
@@ -496,7 +629,7 @@ mod tests {
         let mut m = meta(&["Mono"], vec![ds.clone()]);
         m.split_tracks = true;
         m.format = Format::Wav16;
-        let out = deliver(&Job::new(r, m, 10), &ds, &mut |_| {}).unwrap();
+        let out = deliver(&Job::new(r, m, 10), &ds, 0, &mut |_| {}).unwrap();
         assert!(out.ends_with("take.wav"));
         assert_eq!(fs::metadata(&out).unwrap().len(), 104 + 20);
     }
@@ -505,14 +638,14 @@ mod tests {
     fn reports_progress_on_long_takes() {
         let d = TempDir::new("jobs");
         let r = d.join("t.raw");
-        raw(&r, 40_000, 2);
+        raw(&r, 300_000, 2);
         let ds = dest(d.str());
         let mut m = meta(&["L", "R"], vec![ds.clone()]);
         m.sample_rate = 1000;
         m.format = Format::Wav32f;
         let mut seen = vec![];
-        deliver(&Job::new(r, m, 40_000), &ds, &mut |p| seen.push(p)).unwrap();
-        assert!(!seen.is_empty());
+        deliver(&Job::new(r, m, 300_000), &ds, 0, &mut |p| if let Progress::Fraction(f) = p { seen.push(f) }).unwrap();
+        assert!(seen.len() >= 3);
         assert!(seen.windows(2).all(|w| w[0] < w[1]));
         assert!(seen.iter().all(|&p| p > 0.0 && p < 1.0));
     }
@@ -524,17 +657,17 @@ mod tests {
         raw(&r, 10, 1);
         let m = meta(&["a"], vec![]);
         let job = Job::new(r.clone(), m.clone(), 10);
-        assert_eq!(deliver(&job, &dest(d.join("nope/deeper").to_string_lossy()), &mut |_| {}).unwrap_err(), "Destination not reachable");
+        assert_eq!(deliver(&job, &dest(d.join("nope/deeper").to_string_lossy()), 0, &mut |_| {}).unwrap_err(), "Destination not reachable");
         let missing = Job::new(d.join("gone.raw"), m.clone(), 10);
-        assert!(deliver(&missing, &dest(d.str()), &mut |_| {}).unwrap_err().starts_with("Spool file missing"));
+        assert!(deliver(&missing, &dest(d.str()), 0, &mut |_| {}).unwrap_err().starts_with("Spool file missing"));
         // "day" exists as a file: folder can't be made
         let blocked = TempDir::new("jobs");
         fs::write(blocked.join("day"), b"").unwrap();
-        assert!(deliver(&job, &dest(blocked.str()), &mut |_| {}).unwrap_err().starts_with("Cannot create folder"));
+        assert!(deliver(&job, &dest(blocked.str()), 0, &mut |_| {}).unwrap_err().starts_with("Cannot create folder"));
         // the temp file path is taken by a folder
         let busy = TempDir::new("jobs");
         fs::create_dir_all(busy.join("day/take.wav.part")).unwrap();
-        assert!(deliver(&job, &dest(busy.str()), &mut |_| {}).unwrap_err().starts_with("Cannot write"));
+        assert!(deliver(&job, &dest(busy.str()), 0, &mut |_| {}).unwrap_err().starts_with("Cannot write"));
         // split takes: the take folder can't be created in a read-only day folder
         #[cfg(unix)]
         {
@@ -547,7 +680,7 @@ mod tests {
             let ro = TempDir::new("jobs");
             fs::create_dir_all(ro.join("day")).unwrap();
             fs::set_permissions(ro.join("day"), fs::Permissions::from_mode(0o555)).unwrap();
-            let e = deliver(&split, &dest(ro.str()), &mut |_| {});
+            let e = deliver(&split, &dest(ro.str()), 0, &mut |_| {});
             fs::set_permissions(ro.join("day"), fs::Permissions::from_mode(0o755)).unwrap();
             assert!(e.unwrap_err().starts_with("Cannot create folder"));
             raw(&r, 10, 1);
@@ -557,7 +690,7 @@ mod tests {
         fs::create_dir_all(dir_raw.join("x")).unwrap();
         let bad = Job::new(dir_raw, m, 10);
         let out = TempDir::new("jobs");
-        let e = deliver(&bad, &dest(out.str()), &mut |_| {}).unwrap_err();
+        let e = deliver(&bad, &dest(out.str()), 0, &mut |_| {}).unwrap_err();
         assert!(e.starts_with("Spool read failed") || e.contains("directory"), "{e}");
         let leftovers: Vec<_> = fs::read_dir(out.join("day")).unwrap().flatten().map(|e| e.path()).collect();
         assert!(leftovers.is_empty(), "temp files cleaned up: {leftovers:?}");
@@ -571,7 +704,7 @@ mod tests {
         let ds = Destination { kind: DestKind::Unsupported, path: d.str(), ..Default::default() };
         let job = Job::new(r, meta(&["a"], vec![ds.clone()]), 10);
         assert!(job.tasks.is_empty(), "not even queued");
-        assert_eq!(deliver(&job, &ds, &mut |_| {}).unwrap_err(), crate::dest::UNSUPPORTED);
+        assert_eq!(deliver(&job, &ds, 0, &mut |_| {}).unwrap_err(), crate::dest::UNSUPPORTED);
     }
 
     #[test]
@@ -603,13 +736,13 @@ mod tests {
         let (n, notify) = counter();
         let jobs = Jobs::load(d.path().to_path_buf(), notify);
         let r = jobs.spool_dir().join("long.raw");
-        raw(&r, 50_000, 1);
+        raw(&r, 300_000, 1);
         let mut m = meta(&["M"], vec![dest(out.str())]);
         m.sample_rate = 1000;
-        jobs.push(Job::new(r, m, 50_000));
+        jobs.push(Job::new(r, m, 300_000));
         let before = n.load(Ordering::Relaxed);
         assert!(jobs.run_once());
-        // claim + 1 per 5 s of audio + finish
+        // claim + a few progress reports + finish
         assert!(n.load(Ordering::Relaxed) - before >= 5);
     }
 

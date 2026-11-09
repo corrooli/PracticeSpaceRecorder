@@ -10,6 +10,7 @@ let meters: number[];
 let privileged: boolean;
 let pick: (start: string) => Promise<string | null>;
 let tester: (d: any) => Promise<any>;
+let finder: (d: any) => Promise<any>;
 const sheet = () => document.getElementById("sheet")!;
 const keys = () => [...sheet().querySelectorAll<HTMLElement>(".key")];
 const keyBtn = (label: string) => keys().find((k) => k.textContent === label)!;
@@ -28,11 +29,13 @@ function boot(s: AppState = state()) {
   sent = []; live = []; meters = []; privileged = true;
   pick = async () => "/Picked";
   tester = async () => ({ ok: true, msg: "", path: "/Volumes/Oliver/Test", free: 2e12 });
+  finder = async () => ({ ok: true, msg: "", bot: "@band_bot", chats: [] });
   ed = new Editor();
   ed.init({
     send: (c) => sent.push(JSON.parse(JSON.stringify(c))),
     pickFolder: (s) => pick(s),
     testDest: (d) => tester(d),
+    findChats: (d) => finder(d),
     onLive: (f) => { live.push(f); return () => { live = live.filter((x) => x !== f); }; },
     getMeters: () => meters,
     isPrivileged: () => privileged,
@@ -380,7 +383,7 @@ describe("destinations", () => {
     expect(cards()[0].querySelector(".dkind")!.textContent).toBe("LOCAL FOLDER");
     expect(tiles().length).toBe(0);
     sheet().querySelector<HTMLElement>(".dadd")!.click();
-    expect(tiles().map((t) => t.querySelector(".ktile-title")!.textContent)).toEqual(["LOCAL FOLDER", "NETWORK SHARE"]);
+    expect(tiles().map((t) => t.querySelector(".ktile-title")!.textContent)).toEqual(["LOCAL FOLDER", "NETWORK SHARE", "TELEGRAM"]);
     expect(sheet().querySelector(".dadd")).toBeNull();
     press("CANCEL");
     expect(tiles().length).toBe(0);
@@ -412,7 +415,7 @@ describe("destinations", () => {
     cards()[0].querySelector<HTMLElement>(".key.red")!.click();
     expect(draft().destinations.length).toBe(0);
     // empty: the picker is right there, no cancel
-    expect(tiles().length).toBe(2);
+    expect(tiles().length).toBe(3);
     expect(keys().some((k) => k.textContent === "CANCEL")).toBe(false);
     expect(sheet().textContent).toContain("takes go to your Music folder for now");
     tiles()[0].click();
@@ -423,7 +426,7 @@ describe("destinations", () => {
     boot(state({ presets: [preset(), preset({ id: "p2", name: "Two" })] }));
     ed.open("presets");
     sheet().querySelector<HTMLElement>(".dadd")!.click();
-    expect(tiles().length).toBe(2);
+    expect(tiles().length).toBe(3);
     [...sheet().querySelectorAll<HTMLElement>(".plist-item")][1].click();
     expect(tiles().length).toBe(0);
   });
@@ -639,5 +642,147 @@ describe("TEST button", () => {
     ed.open("presets");
     expect(keyBtn("REMOVE").className).toBe("key red");
     expect(keyBtn("DELETE").className).toBe("key red");
+  });
+});
+
+describe("format", () => {
+  const fmt = () => [...sheet().querySelectorAll<HTMLElement>(".fmt-row")][0];
+  const btn = (label: string) => [...fmt().querySelectorAll<HTMLElement>("button")].find((b) => b.textContent === label)!;
+  const fhint = () => fmt().parentElement!.querySelector(".hint")!.textContent;
+
+  it("WAV or MP3 at a bitrate, with what it costs", () => {
+    ed.open("presets");
+    expect(fmt().querySelector(".rates")!.className).toContain("hidden");
+    expect(fhint()).toBe("As recorded, about 165 MB per 10 minutes.");
+    btn("MP3").click();
+    expect(draft().destinations[0].encoding).toBe("mp3");
+    expect(fmt().querySelector(".rates")!.className).not.toContain("hidden");
+    expect(fhint()).toBe("About 14 MB per 10 minutes.");
+    btn("320").click();
+    expect(draft().destinations[0].bitrate).toBe(320);
+    expect(fhint()).toBe("About 23 MB per 10 minutes.");
+    expect(hint()).toContain("Unsaved");
+    btn("WAV").click();
+    expect(draft().destinations[0].encoding).toBe("wav");
+  });
+
+  it("multitrack notes: mixes, split files, bit depths", () => {
+    const multi = (o: any = {}) => preset({ mode: "multitrack", channels: [1, 2, 3, 4], format: "wav16", ...o });
+    boot(state({ presets: [multi({ destinations: [dest({ encoding: "mp3" })] })] }));
+    ed.open("presets");
+    expect(fhint()).toBe("About 14 MB per 10 minutes. More than two tracks become a stereo mix.");
+    boot(state({ presets: [multi({ split_tracks: true, destinations: [dest({ encoding: "mp3" })] })] }));
+    ed.open("presets");
+    expect(fhint()).toBe("About 27 MB per 10 minutes.", "4 mono files");
+    boot(state({ presets: [multi({ split_tracks: true, format: "wav32f" })] }));
+    ed.open("presets");
+    expect(fhint()).toBe("As recorded, about 439 MB per 10 minutes.");
+    boot(state({ presets: [preset({ mode: "mono", channels: [1] })] }));
+    ed.open("presets");
+    expect(fhint()).toBe("As recorded, about 82 MB per 10 minutes.");
+  });
+});
+
+describe("telegram", () => {
+  const tg = (o: any = {}) => dest({ id: "t1", kind: "telegram", label: "Band chat", path: "", encoding: "mp3", ...o });
+  const withTg = (o: any = {}, st: any = []) => boot(state({ presets: [preset({ destinations: [tg(o)] })], dests: st }));
+  const tokenIn = () => sheet().querySelector<HTMLInputElement>("input[type=password]")!;
+  const chip = () => sheet().querySelector(".chat-chip")!;
+  const chats = () => [...sheet().querySelectorAll<HTMLElement>(".chat")];
+  const msg = () => sheet().querySelector(".chat-msg")!;
+
+  it("fresh: steps, write-only token", () => {
+    withTg();
+    ed.open("presets");
+    expect(sheet().querySelector(".dkind")!.textContent).toBe("TELEGRAM");
+    expect(sheet().querySelectorAll(".tg-steps li").length).toBe(3);
+    expect(tokenIn().placeholder).toBe("123456789:AAH4x…");
+    expect(chip().className).toBe("chat-chip empty");
+    expect(chip().textContent).toBe("No chat picked yet");
+    type(tokenIn(), " 123:SECRETabcd ");
+    expect(draft().destinations[0].token).toBe("123:SECRETabcd");
+    type(tokenIn(), "");
+    expect(draft().destinations[0].token).toBe("", "cleared: back to what it was");
+    expect(sheet().querySelector(".fmt-row")!.parentElement!.querySelector(".hint")!.textContent).toContain("long takes drop to 128 kbps");
+    expect(keyBtn("TEST").title).toBe("Say hi in the chat right now");
+  });
+
+  it("saved: masked, kept unless replaced, no steps", () => {
+    withTg({ token: "••••abcd", chat_id: "-100", chat_name: "Band Chat" }, [{ id: "t1", label: "Band chat", path: "", state: "ready", message: "Ready · Band Chat", free_bytes: 0 }]);
+    ed.open("presets");
+    expect(sheet().querySelector(".tg-steps")).toBeNull();
+    expect(tokenIn().value).toBe("");
+    expect(tokenIn().placeholder).toBe("••••abcd");
+    expect(sheet().querySelector(".dpill-text")!.textContent).toBe("Ready · Band Chat");
+    expect(chip().className).toBe("chat-chip");
+    expect(chip().querySelector("b")!.textContent).toBe("Band Chat");
+    expect(chip().querySelector("small")!.textContent).toBe("-100");
+    type(tokenIn(), "999:NEW");
+    type(tokenIn(), "  ");
+    expect(draft().destinations[0].token).toBe("••••abcd");
+    // a pasted, unsaved token shows masked after a re-render
+    type(tokenIn(), "999:NEWtoken");
+    sheet().querySelector<HTMLElement>(".dswitch")!.click();
+    expect(tokenIn().placeholder).toBe("••••oken");
+  });
+
+  it("find chats: error, nothing yet, pick one", async () => {
+    withTg({ token: "••••abcd" });
+    ed.open("presets");
+    let asked: any = null;
+    let finish!: (r: any) => void;
+    finder = (d) => { asked = d; return new Promise((r) => (finish = r)); };
+    press("FIND CHATS");
+    expect(asked).toMatchObject({ id: "t1", token: "••••abcd" });
+    expect(keyBtn("FIND CHATS").className).toBe("key test testing");
+    expect(msg().textContent).toBe("Asking Telegram…");
+    press("FIND CHATS"); // busy: ignored
+    finish({ ok: false, msg: "Bot token rejected. Paste it again from @BotFather", bot: "", chats: [] });
+    await vi.waitFor(() => expect(msg().className).toBe("chat-msg err"));
+    expect(msg().textContent).toContain("token rejected");
+    expect(keyBtn("FIND CHATS").className).toBe("key");
+    finder = async () => ({ ok: true, msg: "", bot: "@band_bot", chats: [] });
+    press("FIND CHATS");
+    await vi.waitFor(() => expect(msg().textContent).toContain("@band_bot hasn't seen any chats yet"));
+    finder = async () => ({ ok: true, msg: "", bot: "@band_bot", chats: [
+      { id: "-100", name: "The Loud Ones", kind: "supergroup" }, { id: "-5", name: "Chan", kind: "channel" }, { id: "7", name: "Oli", kind: "private" }, { id: "8", name: "X", kind: "weird" }] });
+    press("FIND CHATS");
+    await vi.waitFor(() => expect(chats().length).toBe(4));
+    expect(chats().map((c) => c.querySelector(".chat-kind")!.textContent)).toEqual(["GROUP", "CHANNEL", "DIRECT", "WEIRD"]);
+    expect(msg().textContent).toBe("Chats @band_bot is in. Pick where takes go:");
+    chats()[0].click();
+    expect(draft().destinations[0]).toMatchObject({ chat_id: "-100", chat_name: "The Loud Ones", label: "The Loud Ones" });
+    expect(chip().querySelector("b")!.textContent).toBe("The Loud Ones");
+    expect(sheet().querySelector<HTMLInputElement>(".dname")!.value).toBe("The Loud Ones");
+    // a custom name is kept; the picked chat is highlighted next time
+    type(sheet().querySelector<HTMLInputElement>(".dname")!, "Us");
+    press("FIND CHATS");
+    await vi.waitFor(() => expect(chats().length).toBe(4));
+    expect(chats()[0].className).toBe("chat on");
+    chats()[1].click();
+    expect(draft().destinations[0]).toMatchObject({ chat_id: "-5", label: "Us" });
+  });
+
+  it("chat id by hand, test says who posted where", async () => {
+    withTg({ token: "••••abcd" });
+    ed.open("presets");
+    const adv = [...sheet().querySelectorAll<HTMLElement>(".adv")].pop()!;
+    expect(adv.style.display).toBe("none");
+    const link = [...sheet().querySelectorAll<HTMLElement>(".linkish")].pop()!;
+    link.click();
+    expect(adv.style.display).toBe("");
+    type(adv.querySelector("input")!, " @takes ");
+    expect(draft().destinations[0]).toMatchObject({ chat_id: "@takes", chat_name: "" });
+    expect(chip().querySelector("b")!.textContent).toBe("@takes");
+    expect(chip().querySelector("small")!.textContent).toBe("");
+    tester = async () => ({ ok: true, msg: "", path: "@band_bot posted to Takes", free: 0 });
+    press("TEST");
+    await vi.waitFor(() => expect(sheet().querySelector(".dpill-text")!.textContent).toBe("Works · @band_bot posted to Takes"));
+  });
+
+  it("ready without free space info shows the monitor's words", () => {
+    boot(state({ dests: [{ id: "d1", label: "Local", path: "/music", state: "ready", message: "", free_bytes: 0 }] }));
+    ed.open("presets");
+    expect(sheet().querySelector(".dpill-text")!.textContent).toBe("Ready");
   });
 });

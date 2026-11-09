@@ -2,9 +2,11 @@ mod audio;
 mod config;
 mod dest;
 mod device;
+mod encode;
 mod engine;
 mod jobs;
 mod server;
+mod telegram;
 mod wav;
 #[cfg(test)]
 mod testutil;

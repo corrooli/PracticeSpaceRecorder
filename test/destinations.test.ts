@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { KINDS, kindInfo, newDestination, parseShareUrl } from "../src/destinations";
+import { KINDS, BITRATES, kindInfo, newDestination, parseShareUrl, bytesPerMinute } from "../src/destinations";
 import { dest } from "./fixtures";
 
 describe("destination kinds", () => {
@@ -10,14 +10,21 @@ describe("destination kinds", () => {
       expect(kindInfo(k.kind)).toBe(k);
     }
     expect(kindInfo("unsupported").title).toBe("NEWER KIND");
-    expect(kindInfo("telegram" as any).label).toBe("Destination");
+    expect(kindInfo("pigeon" as any).label).toBe("Destination");
   });
 
   it("new destinations get a name nobody else has", () => {
-    expect(newDestination("folder", [], "a")).toEqual({ id: "a", kind: "folder", label: "Local", path: "", smb_url: "", mount_cmd: "", enabled: true });
+    expect(newDestination("folder", [], "a")).toEqual({ id: "a", kind: "folder", label: "Local", path: "", smb_url: "", mount_cmd: "", enabled: true, encoding: "wav", bitrate: 192, token: "", chat_id: "", chat_name: "" });
+    expect(newDestination("telegram", [], "t")).toMatchObject({ kind: "telegram", label: "Band chat", encoding: "mp3" });
     const taken = [dest({ label: "NAS" }), dest({ label: "NAS 2" })];
     expect(newDestination("share", taken, "b").label).toBe("NAS 3");
     expect(newDestination("share", [dest({ label: "NAS 2" })], "c").label).toBe("NAS");
+  });
+
+  it("sizes and bitrates", () => {
+    expect(BITRATES).toEqual([128, 160, 192, 224, 256, 320]);
+    expect(bytesPerMinute("mp3", 128, 48000, 2, 24)).toBe(960_000);
+    expect(bytesPerMinute("wav", 128, 48000, 2, 24)).toBe(17_280_000);
   });
 
   it("share addresses split like dest.rs does", () => {

@@ -37,7 +37,7 @@ impl Format {
 
 /// What a destination is. Every kind has its own fields in the UI and its own
 /// way to check, test and deliver (see `dest::locate`, `jobs::deliver`). New
-/// kinds (Telegram, ...) are added here first.
+/// kinds are added here first.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DestKind {
@@ -46,10 +46,26 @@ pub enum DestKind {
     Folder,
     /// A network share, found (and connected) from `smb_url`.
     Share,
+    /// A Telegram chat, posted to by a bot (`token`, `chat_id`).
+    Telegram,
     /// Written by a newer version of the app. Kept as is, never delivered to.
     #[serde(other)]
     Unsupported,
 }
+
+/// What gets written to a destination.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Encoding {
+    /// WAV in the preset's bit depth, tracks as recorded.
+    #[default]
+    Wav,
+    /// MP3 at `bitrate`. More than two tracks become a stereo mix unless split.
+    Mp3,
+}
+
+/// MP3 bitrates offered in the UI (kbps).
+pub const BITRATES: [u32; 6] = [320, 256, 224, 192, 160, 128];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -64,6 +80,25 @@ pub struct Destination {
     /// Optional shell command that makes `path` available (e.g. `mount /mnt/nas`).
     pub mount_cmd: String,
     pub enabled: bool,
+    pub encoding: Encoding,
+    /// MP3 bitrate in kbps (one of [`BITRATES`]).
+    pub bitrate: u32,
+    /// Telegram bot token. Write-only: clients only ever see [`mask_token`].
+    pub token: String,
+    /// Telegram chat: numeric id, or `@channelname`.
+    pub chat_id: String,
+    /// Telegram chat title, shown in the UI.
+    pub chat_name: String,
+}
+
+/// What clients see of a token: enough to recognize it, useless to copy.
+pub fn mask_token(t: &str) -> String {
+    let t = t.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let tail: String = t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("\u{2022}\u{2022}\u{2022}\u{2022}{tail}")
 }
 
 impl Destination {
@@ -73,6 +108,7 @@ impl Destination {
             && match self.kind {
                 DestKind::Folder => !self.path.trim().is_empty() || !self.smb_url.trim().is_empty(),
                 DestKind::Share => !self.smb_url.trim().is_empty(),
+                DestKind::Telegram => !self.token.trim().is_empty() && !self.chat_id.trim().is_empty(),
                 DestKind::Unsupported => false,
             }
     }
@@ -82,12 +118,38 @@ impl Destination {
         if self.kind == DestKind::Folder && self.path.trim().is_empty() && !self.smb_url.trim().is_empty() {
             self.kind = DestKind::Share;
         }
+        if !BITRATES.contains(&self.bitrate) {
+            self.bitrate = 192;
+        }
+    }
+
+    /// The copy clients get: the token masked.
+    pub fn redacted(&self) -> Destination {
+        Destination { token: mask_token(&self.token), ..self.clone() }
+    }
+
+    /// Clients send back an empty or masked token ("keep the one you have"):
+    /// put the real one back from the destination with the same id.
+    pub fn restore_token(&mut self, known: &[Preset]) {
+        let t = self.token.trim();
+        if !t.is_empty() && !t.starts_with('\u{2022}') {
+            self.token = t.to_string();
+            return;
+        }
+        self.token = known
+            .iter()
+            .flat_map(|p| &p.destinations)
+            .find(|d| d.id == self.id && !d.token.is_empty())
+            .map(|d| d.token.clone())
+            .unwrap_or_default();
     }
 
     /// What to call it in the UI.
     pub fn display_name(&self) -> String {
         if !self.label.trim().is_empty() {
             self.label.clone()
+        } else if self.kind == DestKind::Telegram {
+            if self.chat_name.trim().is_empty() { "Telegram".into() } else { self.chat_name.clone() }
         } else if !self.path.trim().is_empty() {
             self.path.clone()
         } else {
@@ -106,6 +168,11 @@ impl Default for Destination {
             smb_url: String::new(),
             mount_cmd: String::new(),
             enabled: true,
+            encoding: Encoding::Wav,
+            bitrate: 192,
+            token: String::new(),
+            chat_id: String::new(),
+            chat_name: String::new(),
         }
     }
 }
@@ -273,6 +340,12 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
         // one, never an empty one.
         use std::io::Write;
         let mut f = fs::File::create(&tmp)?;
+        // presets hold bot tokens: owner only (best effort, shares may refuse)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(fs::Permissions::from_mode(0o600));
+        }
         f.write_all(data)?;
         sync_file(&f)?;
     }
@@ -575,12 +648,71 @@ mod tests {
         d.normalize();
         assert_eq!(d.kind, DestKind::Folder, "folder + URL keeps its folder");
         assert!(d.usable());
-        let d: Destination = serde_json::from_str(r#"{"kind":"telegram","path":"/x","chat":"123"}"#).unwrap();
+        let d: Destination = serde_json::from_str(r#"{"kind":"carrier_pigeon","path":"/x","coop":"123"}"#).unwrap();
         assert_eq!(d.kind, DestKind::Unsupported, "newer kinds don't break the config");
         assert!(!d.usable());
         let d = Destination { kind: DestKind::Share, path: "/ignored".into(), smb_url: "".into(), ..Default::default() };
         assert!(!d.usable(), "a share needs its URL");
         assert_eq!(serde_json::to_value(DestKind::Share).unwrap(), "share");
+    }
+
+    fn tg(token: &str) -> Destination {
+        Destination { id: "t1".into(), kind: DestKind::Telegram, label: "".into(), token: token.into(), chat_id: "-100".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn telegram_destinations() {
+        assert!(tg("123:abc").usable());
+        assert!(!tg(" ").usable(), "needs a token");
+        assert!(!Destination { chat_id: "".into(), ..tg("x") }.usable(), "needs a chat");
+        assert_eq!(tg("x").display_name(), "Telegram");
+        assert_eq!(Destination { chat_name: "Band Chat".into(), ..tg("x") }.display_name(), "Band Chat");
+        assert_eq!(Destination { label: "Band".into(), ..tg("x") }.display_name(), "Band");
+        let d: Destination = serde_json::from_str(r#"{"kind":"telegram","bitrate":999}"#).unwrap();
+        assert_eq!((d.encoding, d.bitrate), (Encoding::Wav, 999));
+        let mut d = d;
+        d.normalize();
+        assert_eq!(d.bitrate, 192, "unknown bitrates fall back");
+        let mut d: Destination = serde_json::from_str(r#"{"encoding":"mp3","bitrate":320}"#).unwrap();
+        d.normalize();
+        assert_eq!((d.encoding, d.bitrate), (Encoding::Mp3, 320));
+    }
+
+    #[test]
+    fn tokens_are_masked_and_restored() {
+        assert_eq!(mask_token(""), "");
+        assert_eq!(mask_token(" 123456:ABCdef "), "\u{2022}\u{2022}\u{2022}\u{2022}Cdef");
+        assert_eq!(mask_token("ab"), "\u{2022}\u{2022}\u{2022}\u{2022}ab");
+        let real = tg("123456:SECRETxyz9");
+        let r = real.redacted();
+        assert!(!serde_json::to_string(&r).unwrap().contains("SECRET"));
+        assert_eq!(r.token, "\u{2022}\u{2022}\u{2022}\u{2022}xyz9");
+        let known = vec![Preset { destinations: vec![tg(""), real.clone()], ..Default::default() }];
+        // masked or empty: the stored one comes back
+        let mut back = r.clone();
+        back.restore_token(&known);
+        assert_eq!(back.token, real.token);
+        let mut empty = tg("");
+        empty.restore_token(&known);
+        assert_eq!(empty.token, real.token);
+        // a new one replaces it (trimmed)
+        let mut fresh = tg(" 999:NEW ");
+        fresh.restore_token(&known);
+        assert_eq!(fresh.token, "999:NEW");
+        // unknown id: a mask can't be turned back into anything
+        let mut stranger = Destination { id: "zz".into(), ..r };
+        stranger.restore_token(&known);
+        assert_eq!(stranger.token, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new("cfg");
+        let f = d.join("config.json");
+        write_atomic(&f, b"{}").unwrap();
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]

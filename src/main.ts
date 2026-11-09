@@ -2,7 +2,7 @@ import "./style.css";
 import { h, setText, toggleClass, clear, led, setLed, fmtBytes, fmtClock, fmtDur, noFocus } from "./dom";
 import { WaveView } from "./wave";
 import { Editor } from "./editor";
-import type { AppState, LiveMsg, HistMsg, JobView, Destination, DestTest } from "./types";
+import type { AppState, LiveMsg, HistMsg, JobView, Destination, DestTest, ChatList } from "./types";
 
 // ─── connection ───────────────────────────────────────────────────────────
 type Listener = (m: LiveMsg) => void;
@@ -15,6 +15,7 @@ let lastMeters: number[] = [];
 const liveListeners: Listener[] = [];
 const pickListeners: Record<string, (p: string | null) => void> = {};
 const testListeners: Record<string, (r: DestTest) => void> = {};
+const chatListeners: Record<string, (r: ChatList) => void> = {};
 
 function send(cmd: Record<string, unknown>) {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(cmd));
@@ -37,11 +38,20 @@ function testDest(d: Destination): Promise<DestTest> {
   });
 }
 
+function findChats(d: Destination): Promise<ChatList> {
+  const req = Math.random().toString(36).slice(2);
+  return new Promise((res) => {
+    const t = setTimeout(() => { delete chatListeners[req]; res({ ok: false, msg: "No answer from the recorder", bot: "", chats: [] }); }, 30000);
+    chatListeners[req] = (r) => { clearTimeout(t); res(r); };
+    send({ cmd: "find_chats", req, dest: d });
+  });
+}
+
 if (/[?&]shot/.test(location.search)) document.body.classList.add("shot");
 const $ = (id: string) => document.getElementById(id) as HTMLElement;
 const wave = new WaveView($("wave") as HTMLCanvasElement);
 const editor = new Editor();
-editor.init({ send, pickFolder, testDest, onLive, getMeters, isPrivileged });
+editor.init({ send, pickFolder, testDest, findChats, onLive, getMeters, isPrivileged });
 let retry = 0;
 
 function connect() {
@@ -78,6 +88,9 @@ function connect() {
         break;
       case "dest_test":
         if (testListeners[m.req]) { testListeners[m.req](m as DestTest); delete testListeners[m.req]; }
+        break;
+      case "chats":
+        if (chatListeners[m.req]) { chatListeners[m.req](m as ChatList); delete chatListeners[m.req]; }
         break;
     }
   };

@@ -3,7 +3,7 @@
 //! connected UI (the app window and any tablet) as JSON over a broadcast channel.
 
 use crate::audio::{self, AudioCmd, AudioEvent, Backend, AudioState, AudioStatus, DeviceInfo, StreamSpec, BINS_PER_SEC};
-use crate::config::{self, Destination, Mode, Preset, Settings, Store};
+use crate::config::{self, DestKind, Destination, Mode, Preset, Settings, Store};
 use crate::dest::{DestMonitor, DestState};
 use crate::jobs::{self, Job, Jobs, TakeMeta, TaskState};
 use crossbeam_channel::Sender;
@@ -83,6 +83,7 @@ enum ClientCmd {
     DismissToast,
     PickFolder { req: String, start: Option<String> },
     TestDest { req: String, dest: Destination },
+    FindChats { req: String, dest: Destination },
     Quit,
 }
 
@@ -471,6 +472,7 @@ impl Engine {
                             d.id = config::new_id("d");
                         }
                         d.normalize();
+                        d.restore_token(&s.presets);
                     }
                     let name = preset.name.clone();
                     match s.presets.iter_mut().find(|p| p.id == preset.id) {
@@ -563,12 +565,35 @@ impl Engine {
                 }
                 Ok(())
             }
-            ClientCmd::TestDest { req, dest } => {
+            ClientCmd::TestDest { req, mut dest } => {
+                dest.restore_token(&self.store.lock().presets);
                 let out = self.out.clone();
                 std::thread::spawn(move || {
-                    let msg = match crate::dest::test_write(&dest, Duration::from_secs(25)) {
-                        Ok(r) => json!({ "t": "dest_test", "req": req, "ok": true, "msg": "", "path": r.path, "free": r.free_bytes }),
+                    let r = if dest.kind == DestKind::Telegram {
+                        crate::telegram::test(&dest).map(|m| (m, 0))
+                    } else {
+                        crate::dest::test_write(&dest, Duration::from_secs(25)).map(|r| (r.path.to_string_lossy().into_owned(), r.free_bytes))
+                    };
+                    let msg = match r {
+                        Ok((path, free)) => json!({ "t": "dest_test", "req": req, "ok": true, "msg": "", "path": path, "free": free }),
                         Err(e) => json!({ "t": "dest_test", "req": req, "ok": false, "msg": e, "path": "", "free": 0 }),
+                    };
+                    let _ = out.send(msg.to_string().into());
+                });
+                Ok(())
+            }
+            ClientCmd::FindChats { req, mut dest } => {
+                dest.restore_token(&self.store.lock().presets);
+                let out = self.out.clone();
+                std::thread::spawn(move || {
+                    let msg = if dest.token.trim().is_empty() {
+                        json!({ "t": "chats", "req": req, "ok": false, "msg": "Paste the bot token first", "bot": "", "chats": [] })
+                    } else {
+                        let bot = crate::telegram::Bot::new(&dest.token);
+                        match bot.me().and_then(|me| bot.chats().map(|c| (me, c))) {
+                            Ok((me, chats)) => json!({ "t": "chats", "req": req, "ok": true, "msg": "", "bot": me, "chats": chats }),
+                            Err(e) => json!({ "t": "chats", "req": req, "ok": false, "msg": e, "bot": "", "chats": [] }),
+                        }
                     };
                     let _ = out.send(msg.to_string().into());
                 });
@@ -654,7 +679,7 @@ impl Engine {
             "version": env!("CARGO_PKG_VERSION"),
             "now": jobs::now_ms(),
             "settings": store.settings,
-            "presets": store.presets,
+            "presets": store.presets.iter().map(|p| Preset { destinations: p.destinations.iter().map(|d| d.redacted()).collect(), ..p.clone() }).collect::<Vec<_>>(),
             "active": active.id,
             "tracks": tracks,
             "devices": rt.devices,
@@ -1157,6 +1182,44 @@ mod tests {
     }
 
     #[test]
+    fn telegram_token_never_leaves_and_survives_round_trips() {
+        let r = Rig::new();
+        let p = r.presets()[0].id.clone();
+        let tg = r#"{"id":"tg1","kind":"telegram","label":"Band","token":"123:SECRETabcd","chat_id":"-100","encoding":"mp3","bitrate":192}"#;
+        r.cmd(&format!(r#"{{"cmd":"save_preset","preset":{{"id":"{p}","name":"x","destinations":[{tg}]}}}}"#));
+        let snap = r.e.snapshot();
+        assert!(!snap.to_string().contains("SECRET"), "token must not reach clients");
+        assert_eq!(snap["presets"][0]["destinations"][0]["token"], "\u{2022}\u{2022}\u{2022}\u{2022}abcd");
+        assert_eq!(r.presets()[0].destinations[0].token, "123:SECRETabcd");
+        // the UI saves what it got: the mask. The real token stays.
+        let back = snap["presets"][0].to_string();
+        r.cmd(&format!(r#"{{"cmd":"save_preset","preset":{back}}}"#));
+        assert_eq!(r.presets()[0].destinations[0].token, "123:SECRETabcd");
+        // test and find chats fill in the real token (and fail here: no Telegram in tests)
+        let mut sub = r.e.subscribe();
+        let masked = snap["presets"][0]["destinations"][0].to_string();
+        r.cmd(&format!(r#"{{"cmd":"test_dest","req":"t","dest":{masked}}}"#));
+        r.cmd(&format!(r#"{{"cmd":"find_chats","req":"f","dest":{masked}}}"#));
+        r.cmd(r#"{"cmd":"find_chats","req":"none","dest":{"id":"other","kind":"telegram"}}"#);
+        let mut got = std::collections::HashMap::new();
+        assert!(wait_for(20, || {
+            while let Ok(m) = sub.try_recv() {
+                let v: Value = serde_json::from_str(&m).unwrap();
+                if let Some(q) = v["req"].as_str() {
+                    got.insert(q.to_string(), v);
+                }
+            }
+            got.len() == 3
+        }));
+        assert_eq!(got["t"]["t"], "dest_test");
+        assert_eq!(got["t"]["msg"], "Telegram not reachable (offline?)");
+        assert_eq!(got["f"]["t"], "chats");
+        assert_eq!(got["f"]["msg"], "Telegram not reachable (offline?)");
+        assert_eq!(got["none"]["msg"], "Paste the bot token first");
+        assert_eq!(got["none"]["chats"], json!([]));
+    }
+
+    #[test]
     fn toasts_get_increasing_ids() {
         let r = Rig::new();
         r.e.toast("ok", "a");
@@ -1259,7 +1322,7 @@ mod tests {
             let mut j = Job::new(PathBuf::from("x"), TakeMeta {
                 take_name: "t".into(), rel_path: "t".into(), preset_name: "p".into(), sample_rate: 1, track_names: vec![], format: config::Format::Wav24, split_tracks: false, started_at: 0, destinations: vec![],
             }, 1);
-            j.tasks = states.iter().map(|st| DestTask { label: "d".into(), dest: Destination::default(), state: st.clone(), progress: 0.0, message: String::new(), attempts: 0, next_try: 0, out_path: String::new() }).collect();
+            j.tasks = states.iter().map(|st| DestTask { label: "d".into(), dest: Destination::default(), state: st.clone(), progress: 0.0, message: String::new(), attempts: 0, next_try: 0, out_path: String::new(), sent: 0 }).collect();
             j
         };
         {

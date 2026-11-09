@@ -35,6 +35,8 @@ struct Entry {
     status: DestStatus,
     busy: bool,
     last_mount: Option<Instant>,
+    /// Online destinations aren't asked every few seconds.
+    next_probe: Option<Instant>,
 }
 
 pub struct DestMonitor {
@@ -73,6 +75,7 @@ impl DestMonitor {
                     status: DestStatus { id: d.id.clone(), label: label(d), path: d.path.clone(), state: DestState::Checking, message: "Checking".into(), free_bytes: 0 },
                     busy: false,
                     last_mount: None,
+                    next_probe: None,
                 });
             }
         }
@@ -94,7 +97,7 @@ impl DestMonitor {
             {
                 let mut e = self.entries.lock();
                 let Some(en) = e.get_mut(&k) else { continue };
-                if en.busy {
+                if en.busy || en.next_probe.is_some_and(|t| t > Instant::now()) {
                     continue;
                 }
                 en.busy = true;
@@ -122,6 +125,19 @@ impl DestMonitor {
     }
 
     fn check(self: Arc<Self>, d: Destination, k: String) {
+        if d.kind == DestKind::Telegram {
+            let res = crate::telegram::probe(&d);
+            let wait = Duration::from_secs(if res.is_ok() { 60 } else { 20 });
+            self.set(&k, |e| {
+                (e.status.state, e.status.message) = match res {
+                    Ok(m) => (DestState::Ready, m),
+                    Err(m) => (DestState::Error, m),
+                };
+                e.next_probe = Some(Instant::now() + wait);
+                e.busy = false;
+            });
+            return;
+        }
         let res = probe_dest(&d);
         let (state, msg, free) = match res {
             Ok(free) => (DestState::Ready, "Ready".to_string(), free),
@@ -162,7 +178,7 @@ impl DestMonitor {
 }
 
 fn key(d: &Destination) -> String {
-    format!("{}|{}|{}|{}", d.id, d.path, d.smb_url, d.mount_cmd)
+    format!("{}|{}|{}|{}|{}|{}", d.id, d.path, d.smb_url, d.mount_cmd, d.token, d.chat_id)
 }
 
 fn label(d: &Destination) -> String {
@@ -179,6 +195,7 @@ fn probe_dest(d: &Destination) -> Result<u64, String> {
 pub fn locate(d: &Destination) -> Result<PathBuf, String> {
     match d.kind {
         DestKind::Unsupported => return Err(UNSUPPORTED.into()),
+        DestKind::Telegram => return Err("Not a folder".into()),
         DestKind::Folder if !d.path.trim().is_empty() => return Ok(PathBuf::from(d.path.trim())),
         _ => {}
     }
@@ -192,8 +209,10 @@ pub fn locate(d: &Destination) -> Result<PathBuf, String> {
 /// Folder for a delivery: locate it, mounting the share once if it is missing.
 /// A missing last folder is created, but never inside a bare mount root.
 pub fn reach(d: &Destination) -> Result<PathBuf, String> {
-    if d.kind == DestKind::Unsupported {
-        return Err(UNSUPPORTED.into());
+    match d.kind {
+        DestKind::Unsupported => return Err(UNSUPPORTED.into()),
+        DestKind::Telegram => return Err("Not a folder".into()),
+        _ => {}
     }
     let ready = |p: &Path| -> Result<bool, String> {
         if p.is_dir() {
@@ -578,6 +597,7 @@ mod tests {
             status: DestStatus { id: d.id.clone(), label: label(d), path: d.path.clone(), state: DestState::Checking, message: "Checking".into(), free_bytes: 0 },
             busy: true,
             last_mount: None,
+            next_probe: None,
         });
         m.order.lock().push(d.clone());
     }
@@ -589,6 +609,28 @@ mod tests {
 
     fn share(tmp: &TempDir, mount_cmd: &str) -> Destination {
         Destination { id: "nas".into(), label: "NAS".into(), path: tmp.join("share/takes").to_string_lossy().into(), mount_cmd: mount_cmd.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn telegram_status_is_checked_now_and_then() {
+        use crate::telegram::mock::{fail, ok, Mock};
+        let _m = Mock::start(|_| ok(r#"{"title":"Band Chat"}"#));
+        let (m, _) = monitor();
+        let d = Destination { id: "tg".into(), kind: DestKind::Telegram, token: "1:a".into(), chat_id: "-1".into(), ..Default::default() };
+        add(&m, &d);
+        let s = check(&m, &d);
+        assert_eq!((s.state, s.message.as_str()), (DestState::Ready, "Ready \u{b7} Band Chat"));
+        let next = m.entries.lock()[&key(&d)].next_probe.unwrap();
+        assert!(next > Instant::now() + Duration::from_secs(50));
+        // not due: tick leaves it alone
+        m.tick();
+        assert!(!m.entries.lock()[&key(&d)].busy);
+        let _m = Mock::start(|_| fail(400, "Bad Request: chat not found"));
+        let s = check(&m, &d);
+        assert_eq!((s.state, s.message.as_str()), (DestState::Error, "Chat not found. Is the bot in that chat?"));
+        assert!(m.entries.lock()[&key(&d)].next_probe.unwrap() < Instant::now() + Duration::from_secs(25), "errors are checked sooner");
+        assert_eq!(locate(&d).unwrap_err(), "Not a folder");
+        assert_eq!(reach(&d).unwrap_err(), "Not a folder");
     }
 
     #[test]
@@ -853,7 +895,7 @@ mod tests {
             track_names: vec!["L".into(), "R".into()], format: crate::config::Format::Wav24, split_tracks: false, started_at: 0, destinations: vec![d.clone()],
         };
         let job = crate::jobs::Job::new(raw, meta, 48000);
-        let out = crate::jobs::deliver(&job, &d, &mut |_| {}).expect("delivered");
+        let out = crate::jobs::deliver(&job, &d, 0, &mut |_| {}).expect("delivered");
         eprintln!("wrote {out}");
         assert_eq!(std::fs::metadata(&out).unwrap().len(), 104 + 48000 * 6);
         std::fs::remove_file(out).unwrap();
