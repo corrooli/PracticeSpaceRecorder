@@ -328,6 +328,7 @@ fn mounted_share(u: &ShareUrl) -> Option<PathBuf> {
 }
 
 /// macOS `mount` output: `//me@nas.local/Music on /Volumes/Music (smbfs, ...)`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn find_in_bsd_mounts(table: &str, u: &ShareUrl) -> Option<PathBuf> {
     table.lines().find_map(|line| {
         let (src, rest) = line.split_once(" on ")?;
