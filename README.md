@@ -11,6 +11,7 @@ Your take is already saved, and you're halfway into the next song.
 ![macOS](https://img.shields.io/badge/macOS-11%2B-2b2a31?style=flat-square&logo=apple)
 ![Linux](https://img.shields.io/badge/Linux-deb%20%7C%20rpm%20%7C%20AppImage-2b2a31?style=flat-square&logo=linux&logoColor=white)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-2b2a31?style=flat-square)
+[![Buy me a coffee](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20coffee-ffb048?style=flat-square&logo=kofi&logoColor=white)](https://ko-fi.com/olivercorrodi)
 
 <br/>
 
@@ -44,6 +45,10 @@ Built for the practice space of [Naked Soldier](http://www.nakedsoldier.ch/). Sh
 
 PracticeSpaceRecorder writes every take to one or more **destinations**: a folder on the computer, a USB stick, an external drive, a NAS, or straight into your band's Telegram chat. Use one, use all of them, the app doesn't judge.
 
+<img src="docs/flow.svg" alt="Your band plays into the recording computer, and every take goes to a USB stick as a mastered WAV, to a NAS as a raw WAV, and to the band chat as an auto mastered MP3, all at once" width="100%" />
+
+Every destination gets its own format: a loud WAV to listen to at home, the raw WAV for mixing later, a small MP3 for the phones.
+
 ### The USB stick (what most bands want)
 
 Plug a USB stick or an external SSD/HDD into the recording computer, make it a destination, and play. After practice, grab the stick and take it home. That's the whole workflow.
@@ -56,11 +61,15 @@ Forgot the stick at home? Keep recording anyway. Takes wait on the computer and 
 
 If your practice space has a NAS or any network share, takes can go straight there. Nobody has to remember a stick, and nobody "accidentally" takes it home for three weeks.
 
-<img src="docs/usecase-nas.svg" alt="Recording computer sends takes over the network to a NAS, an optional bot posts them to the band chat" width="100%" />
+<img src="docs/usecase-nas.svg" alt="Recording computer sends takes over the network to a NAS" width="100%" />
 
 ### The band chat (for bands that live on their phones)
 
-Add a **Telegram** destination and a bot posts every take into your group chat, ready to play, before the van is loaded. Pair it with a USB stick or the NAS: the chat gets a handy MP3, the drive keeps the full quality WAV. See [Sending takes to Telegram](#sending-takes-to-telegram).
+Add a **Telegram** destination and a bot posts every take into your group chat, ready to play, before the van is loaded.
+
+<img src="docs/usecase-telegram.svg" alt="Recording computer sends takes over the internet to your Telegram bot, which posts them to the band chat on everyone's phone" width="100%" />
+
+Pair it with a USB stick or the NAS: the chat gets a handy MP3, the drive keeps the full quality WAV. See [Sending takes to Telegram](#sending-takes-to-telegram).
 
 <br/>
 
@@ -75,6 +84,7 @@ Add a **Telegram** destination and a bot posts every take into your group chat, 
 | **Saves in the background** | When you stop, the take is written to every destination (local disk, USB stick, external drive, NAS, all of them at once) while you're already recording the next one. |
 | **Lose nothing, ever** | Audio goes to a local buffer first. USB stick unplugged? NAS asleep? The take waits and delivers itself when the destination is back, even after a restart. Power cut mid-take? The audio up to that point is recovered on next launch. |
 | **Straight to the band chat** | A Telegram bot posts every take into your group, as MP3 so it doesn't eat everyone's data plan. |
+| **Loud enough, automatically** | Practice recordings are usually way too quiet. The auto master brings every take up to a healthy level and keeps the peaks from clipping. No knobs, no presets, switch it off per destination if you want the raw file. |
 | **WAV or MP3, per destination** | Full quality WAV on the drive, small MP3s for the chat, or whatever mix you like. More than two tracks become a stereo mix for MP3. |
 | **Auto-connects your NAS** | Give it an `smb://` address and it mounts the share by itself (using your Keychain login on the Mac). |
 | **Remote control** | Any phone, tablet or laptop on your Wi-Fi can be the record button. Scan a QR code and you're done. No app needed. |
@@ -197,6 +207,23 @@ And if the NAS is off, asleep, or someone tripped over the network cable: **keep
 
 <br/>
 
+## Auto master
+
+Interfaces in practice rooms are set with lots of headroom (good, nothing clips), which makes the recordings quiet (bad, you can't hear them on a phone). So before a take is written, PracticeSpaceRecorder listens to all of it once and then:
+
+<img src="docs/automaster.svg" alt="A quiet take at -36 LUFS becomes a loud one at -14 LUFS, peaks stay under -1 dBTP" width="100%" />
+
+
+* turns it up to about the loudness of a streaming service (-14 LUFS),
+* catches the peaks with a look-ahead limiter so nothing clips, not even after MP3 encoding (-1 dBTP),
+* takes out sub-bass rumble nobody hears but every speaker has to move for.
+
+It never squashes: the limiter shaves a few dB off the loudest hits at most, quiet takes get a bit less loud instead. Silence stays silence, and takes that are loud already are left as they are. It's not a mastering engineer, but your phone speaker won't know the difference.
+
+Files meant for mixing (one file per track, or multichannel WAVs) are always left untouched. Want the raw take everywhere? Switch **Auto master** off on the destination.
+
+<br/>
+
 ## Sending takes to Telegram
 
 1. In Telegram, message **@BotFather**, send `/newbot`, pick a name. It gives you a **token** (looks like `123456789:AAH4x...`).
@@ -284,8 +311,8 @@ If your computer sees it as an input, yes. Focusrite, MOTU, RME, Behringer, the 
 **What happens if the computer crashes in the middle of a take?**<br/>
 The audio is streamed to disk the whole time. On the next start, the take is recovered and delivered like any other one. You lose maybe a fraction of a second.
 
-**Why WAV and not MP3?**<br/>
-Because you might want to mix that one magic take later. Make MP3s from it when you share it with the band chat.
+**WAV or MP3?**<br/>
+Both, if you like. Keep WAV on the drive, because you might want to mix that one magic take later, and send MP3s to the band chat so nobody's data plan cries. You pick per destination.
 
 **Do I need a NAS?**<br/>
 Nope. Most bands don't have one, and that's fine. A local folder is the default destination, and a USB stick is all you need to take the takes home.
@@ -313,6 +340,14 @@ npm run bundle    # build installers into src-tauri/target/release/bundle
 How it fits together: a Rust core (audio capture with [cpal](https://github.com/RustAudio/cpal), a lock-free ring buffer, the delivery queue, share mounting) serves the UI over a local web server. The app window is a native [Tauri](https://tauri.app) window showing that UI, and tablets load the very same page over Wi-Fi. One UI, two doors.
 
 Releases are built by GitHub Actions: push a tag like `v1.0.1` and installers for every platform show up in a draft release.
+
+<br/>
+
+## Buy me a coffee
+
+PracticeSpaceRecorder is free and stays free. If it saved a riff your band would otherwise have forgotten, you can [buy me a coffee on Ko-fi](https://ko-fi.com/olivercorrodi). It goes straight into more coffee, new strings and the occasional replacement for whatever the drummer broke.
+
+<a href="https://ko-fi.com/olivercorrodi"><img src="https://img.shields.io/badge/Ko--fi-support%20this%20project-ffb048?style=for-the-badge&logo=kofi&logoColor=white" alt="Support this project on Ko-fi" /></a>
 
 <br/>
 
